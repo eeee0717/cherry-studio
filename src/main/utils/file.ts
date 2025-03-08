@@ -14,7 +14,8 @@ export function getFileType(ext: string): FileTypes {
   if (documentExts.includes(ext)) return FileTypes.DOCUMENT
   return FileTypes.OTHER
 }
-export function getAllFiles(dirPath: string, arrayOfFiles: FileType[] = []): FileType[] {
+export function getAllFiles(dirPath: string, filters?: string[], arrayOfFiles: FileType[] = []): FileType[] {
+  console.log('filters', filters)
   const files = fs.readdirSync(dirPath)
 
   files.forEach((file) => {
@@ -24,11 +25,14 @@ export function getAllFiles(dirPath: string, arrayOfFiles: FileType[] = []): Fil
 
     const fullPath = path.join(dirPath, file)
     if (fs.statSync(fullPath).isDirectory()) {
-      arrayOfFiles = getAllFiles(fullPath, arrayOfFiles)
+      arrayOfFiles = getAllFiles(fullPath, filters, arrayOfFiles)
     } else {
       const ext = path.extname(file)
       const fileType = getFileType(ext)
 
+      if (filters && filters.includes(ext.startsWith('.') ? ext.slice(1) : ext)) {
+        return
+      }
       if ([FileTypes.OTHER, FileTypes.IMAGE, FileTypes.VIDEO, FileTypes.AUDIO].includes(fileType)) {
         return
       }

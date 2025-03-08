@@ -324,7 +324,9 @@
       "title": "知识库",
       "url_added": "网址已添加",
       "url_placeholder": "请输入网址, 多个网址用回车分隔",
-      "urls": "网址"
+      "urls": "网址",
+      "filters_title": "文件扩展名过滤",
+      "filters_input_placeholder": "用英文逗号分隔(,):json, html"
     },
     "languages": {
       "arabic": "阿拉伯文",
@@ -479,7 +481,7 @@
       },
       "vision": "视觉",
       "websearch": "联网",
-      "edit": "编辑模型", 
+      "edit": "编辑模型",
       "no_matches": "无可用模型"
     },
     "navbar": {

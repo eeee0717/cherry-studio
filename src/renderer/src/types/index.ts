@@ -253,6 +253,7 @@ export interface KnowledgeBase {
   chunkSize?: number
   chunkOverlap?: number
   threshold?: number
+  filters?: string[]
 }
 
 export type KnowledgeBaseParams = {
@@ -264,6 +265,7 @@ export type KnowledgeBaseParams = {
   baseURL: string
   chunkSize?: number
   chunkOverlap?: number
+  filters?: string[]
 }
 
 export type GenerateImageParams = {

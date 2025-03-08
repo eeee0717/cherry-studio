@@ -20,8 +20,8 @@ import FileManager from '@renderer/services/FileManager'
 import { getProviderName } from '@renderer/services/ProviderService'
 import { FileType, FileTypes, KnowledgeBase, KnowledgeItem } from '@renderer/types'
 import { bookExts, documentExts, textExts, thirdPartyApplicationExts } from '@shared/config/constant'
-import { Alert, Button, Card, Divider, Dropdown, message, Tag, Tooltip, Typography, Upload } from 'antd'
-import { FC } from 'react'
+import { Alert, Button, Card, Divider, Dropdown, Input, message, Tag, Tooltip, Typography, Upload } from 'antd'
+import { FC, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import styled from 'styled-components'
 
@@ -57,8 +57,11 @@ const KnowledgeContent: FC<KnowledgeContentProps> = ({ selectedBase }) => {
     getDirectoryProcessingPercent,
     addNote,
     addDirectory,
-    updateItem
+    updateItem,
+    updateKnowledgeBase
   } = useKnowledge(selectedBase.id || '')
+  const [filters, setFilters] = useState<string[]>(base?.filters ?? [])
+  const [filterInputValue, setFilterInputValue] = useState<string>(base?.filters?.join(', ') || '')
 
   const providerName = getProviderName(base?.model.provider || '')
   const disabled = !base?.version || !providerName
@@ -225,6 +228,30 @@ const KnowledgeContent: FC<KnowledgeContentProps> = ({ selectedBase }) => {
       })
     }
   }
+  const handleAddFilters = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const input = e.target.value
+    const filters = input.trim()
+      ? Array.from(
+          new Set(
+            input
+              .trim()
+              .split(',')
+              .map((item) => item.trim().toLowerCase())
+              .filter((item) => item)
+          )
+        )
+      : []
+    setFilters(filters)
+  }
+
+  const handleSaveFilters = async () => {
+    updateKnowledgeBase({
+      ...base,
+      filters: filters
+    })
+    setFilterInputValue(filters.join(', '))
+    message.success(t('message.save.success.title'))
+  }
 
   return (
     <MainContent>
@@ -284,6 +311,22 @@ const KnowledgeContent: FC<KnowledgeContentProps> = ({ selectedBase }) => {
       <ContentSection>
         <TitleWrapper>
           <Title level={5}>{t('knowledge.directories')}</Title>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div>{t('knowledge.filters_title')}</div>
+            <Input
+              style={{ width: 250 }}
+              allowClear
+              size="small"
+              value={filterInputValue}
+              placeholder={t('knowledge.filters_input_placeholder')}
+              onChange={(e) => {
+                setFilterInputValue(e.target.value)
+                handleAddFilters(e)
+              }}
+            />
+            <Button onClick={handleSaveFilters}>save</Button>
+          </div>
+
           <Button icon={<PlusOutlined />} onClick={handleAddDirectory} disabled={disabled}>
             {t('knowledge.add_directory')}
           </Button>

@@ -197,7 +197,7 @@ class KnowledgeService {
   ): LoaderTask {
     const { base, item, forceReload } = options
     const directory = item.content as string
-    const files = getAllFiles(directory)
+    const files = getAllFiles(directory, base.filters)
     const totalFiles = files.length
     let processedFiles = 0
 
