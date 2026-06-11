@@ -1,5 +1,8 @@
 import { FILE_TYPE } from '@shared/data/types/file'
-import { KNOWLEDGE_BASE_ERROR_MISSING_EMBEDDING_MODEL } from '@shared/data/types/knowledge'
+import {
+  KNOWLEDGE_BASE_ERROR_MISSING_EMBEDDING_MODEL,
+  KNOWLEDGE_ITEM_ERROR_DIRECTORY_NOT_MIGRATED
+} from '@shared/data/types/knowledge'
 import { describe, expect, it } from 'vitest'
 
 import { legacyModelToUniqueId } from '../../transformers/ModelTransformers'
@@ -621,5 +624,55 @@ describe('KnowledgeMappings', () => {
         updatedAt: expect.any(Number)
       }
     })
+  })
+
+  it('transformKnowledgeItem fails a v1-indexed directory with the not-migrated code', () => {
+    // V1 embedded the folder's files under the directory item's loader ids; the
+    // vector migrator drops those container-level vectors, so a `completed`
+    // directory would be an empty shell that never re-indexes. It must surface
+    // as failed with the code the UI renders as a re-embed warning.
+    const result = transformKnowledgeItem(
+      'kb-1',
+      {
+        id: 'dir-1',
+        type: 'directory',
+        content: '/tmp/docs',
+        uniqueId: 'DirectoryLoader_1'
+      },
+      {
+        noteById: new Map(),
+        filesById: new Map()
+      }
+    )
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.value.status).toBe('failed')
+      expect(result.value.error).toBe(KNOWLEDGE_ITEM_ERROR_DIRECTORY_NOT_MIGRATED)
+    }
+  })
+
+  it('transformKnowledgeItem keeps the shared failed mapping for an interrupted directory', () => {
+    // Only the lying `completed` state is overridden; a v1-interrupted directory
+    // stays on the shared transient-state mapping and its retry message.
+    const result = transformKnowledgeItem(
+      'kb-1',
+      {
+        id: 'dir-1',
+        type: 'directory',
+        content: '/tmp/docs',
+        processingStatus: 'processing'
+      },
+      {
+        noteById: new Map(),
+        filesById: new Map()
+      }
+    )
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.value.status).toBe('failed')
+      expect(result.value.error).toBe('Legacy knowledge item indexing was interrupted and needs to be retried.')
+    }
   })
 })

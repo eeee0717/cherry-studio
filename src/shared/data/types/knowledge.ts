@@ -78,6 +78,15 @@ export const KnowledgeBaseErrorCodeSchema = z.enum(KNOWLEDGE_BASE_ERROR_CODES)
 export type KnowledgeBaseErrorCode = z.infer<typeof KnowledgeBaseErrorCodeSchema>
 export const KNOWLEDGE_BASE_ERROR_MISSING_EMBEDDING_MODEL: KnowledgeBaseErrorCode = 'missing_embedding_model'
 
+/**
+ * Item-level error code stored on v1-indexed `directory` items by the v2
+ * migration: v1 embedded a folder's files under the directory item's loader ids
+ * without per-file items, so those container-level vectors have no v2 home and
+ * are dropped. The renderer maps this code to a localized re-embed warning
+ * (same code → i18n pattern as the base error codes above).
+ */
+export const KNOWLEDGE_ITEM_ERROR_DIRECTORY_NOT_MIGRATED = 'directory_not_migrated'
+
 export const KnowledgeChunkSizeSchema = z.number().int().positive()
 export const KnowledgeChunkOverlapSchema = z.number().int().min(0)
 export const KnowledgeThresholdSchema = z.number().min(0).max(1)
