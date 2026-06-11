@@ -25,6 +25,7 @@ vi.mock('../../storage/pathStorage', async () => {
 })
 
 const { deriveUrlSnapshotSlug, captureUrlSnapshotFile } = await import('../urlSnapshot')
+const { stripCherryFrontmatter } = await import('../cherryFrontmatter')
 
 describe('deriveUrlSnapshotSlug', () => {
   it('uses the first markdown heading', () => {
@@ -65,7 +66,17 @@ describe('captureUrlSnapshotFile', () => {
     const relativePath = await captureUrlSnapshotFile('kb-1', 'https://example.com/p', markdown, new Set())
 
     expect(relativePath).toBe('My Page.md')
-    expect(writeFileIntoKnowledgeBaseAtMock).toHaveBeenCalledWith('kb-1', 'My Page.md', markdown)
+    expect(writeFileIntoKnowledgeBaseAtMock).toHaveBeenCalledWith('kb-1', 'My Page.md', expect.any(String))
+  })
+
+  it('prefixes the markdown with a cherry frontmatter block that strips back off exactly', async () => {
+    const markdown = '# My Page\n\nbody'
+    await captureUrlSnapshotFile('kb-1', 'https://example.com/p', markdown, new Set())
+
+    const written = writeFileIntoKnowledgeBaseAtMock.mock.calls[0][2] as string
+    expect(written).toMatch(/^---\ncherry:\n {2}type: url-snapshot\n {2}source: "https:\/\/example\.com\/p"\n/)
+    expect(written).toMatch(/ {2}captured_at: "\d{4}-\d{2}-\d{2}T[^"]+"\n/)
+    expect(stripCherryFrontmatter(written)).toBe(markdown)
   })
 
   it('renames around an already-reserved snapshot name', async () => {

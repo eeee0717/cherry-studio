@@ -38,8 +38,7 @@ export function createSupportedFileReader(filePath: FilePath): VectorStoreFileRe
 
 /**
  * Read a base-relative file with the extension's reader and tag every document
- * with `source`. Shared by the file reader and the URL reader (whose captured
- * snapshot is a `.md` file in the same base).
+ * with `source`.
  */
 export async function loadDocumentsFromKnowledgeBaseFile(
   baseId: string,

@@ -1,6 +1,7 @@
 import { sanitizeFilename } from '@shared/file/types/filename'
 
 import { dedupeKnowledgeRelativePath, writeFileIntoKnowledgeBaseAt } from '../storage/pathStorage'
+import { serializeCherryUrlSnapshotFrontmatter } from './cherryFrontmatter'
 
 const SNAPSHOT_TITLE_MAX = 80
 
@@ -45,6 +46,10 @@ function urlStem(url: string): string {
  * name and return its base-relative path. `reservedPaths` is the set of names
  * already occupied in the base; callers build it and call this under the base
  * mutation lock so two concurrent captures cannot pick the same path.
+ *
+ * The file is the markdown prefixed with the `cherry` frontmatter block, which
+ * records the source URL on the file itself (knowledge_item exit path,
+ * knowledge-technical-design.md §7); reading for indexing strips it back off.
  */
 export async function captureUrlSnapshotFile(
   baseId: string,
@@ -53,5 +58,9 @@ export async function captureUrlSnapshotFile(
   reservedPaths: Set<string>
 ): Promise<string> {
   const relativePath = dedupeKnowledgeRelativePath(`${deriveUrlSnapshotSlug(markdown, url)}.md`, reservedPaths)
-  return await writeFileIntoKnowledgeBaseAt(baseId, relativePath, markdown)
+  const frontmatter = serializeCherryUrlSnapshotFrontmatter({
+    source: url,
+    capturedAt: new Date().toISOString()
+  })
+  return await writeFileIntoKnowledgeBaseAt(baseId, relativePath, frontmatter + markdown)
 }

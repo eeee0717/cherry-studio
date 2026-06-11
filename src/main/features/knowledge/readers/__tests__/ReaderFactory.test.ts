@@ -1,3 +1,4 @@
+import type * as FsUtils from '@main/utils/file/fs'
 import type { KnowledgeItemOf } from '@shared/data/types/knowledge'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -84,6 +85,13 @@ vi.mock('../files/EpubReader', () => ({
   EpubReader: class {
     loadData = customReaderSpies.epub
   }
+}))
+
+// The URL reader reads its snapshot verbatim via fs, not a vectorstores reader.
+const readFileMock = vi.hoisted(() => vi.fn())
+vi.mock('@main/utils/file/fs', async (importOriginal) => ({
+  ...(await importOriginal<typeof FsUtils>()),
+  read: readFileMock
 }))
 
 const { loadKnowledgeItemDocuments } = await import('../KnowledgeReader')
@@ -255,15 +263,19 @@ describe('loadKnowledgeItemDocuments', () => {
     })
   })
 
-  it('reads a url item from its captured snapshot via the markdown reader', async () => {
+  it('reads a url item verbatim from its captured snapshot, minus the cherry frontmatter', async () => {
+    readFileMock.mockResolvedValueOnce(
+      '---\ncherry:\n  type: url-snapshot\n  source: "https://example.com"\n---\n# Page\n\nbody\n'
+    )
     const item = createUrlItem()
     const docs = await loadKnowledgeItemDocuments(item)
 
     // The reader never fetches; the indexing job's ensure-snapshot step does.
     expect(fetchMock).not.toHaveBeenCalled()
-    expect(readerSpies.markdown).toHaveBeenCalledWith('/mock/feature.knowledgebase.data/base-1/example-page.md')
+    expect(readFileMock).toHaveBeenCalledWith('/mock/feature.knowledgebase.data/base-1/example-page.md')
     expect(docs).toHaveLength(1)
     expect(docs[0]).toMatchObject({
+      text: '# Page\n\nbody\n',
       metadata: {
         source: 'https://example.com'
       }
