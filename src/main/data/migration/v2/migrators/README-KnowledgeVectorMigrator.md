@@ -1,6 +1,6 @@
 # KnowledgeVectorMigrator
 
-`KnowledgeVectorMigrator` migrates legacy per-base `embedjs` vector databases into the new per-base 9-table `index.sqlite` store (`KnowledgeIndexStore`).
+`KnowledgeVectorMigrator` migrates legacy per-base `embedjs` vector databases into the new per-base 7-table `index.sqlite` store (`KnowledgeIndexStore`).
 
 ## Data Sources
 
@@ -15,7 +15,7 @@ The source reader is initialized by `MigrationContext` with `ctx.paths.knowledge
 
 ## Target Storage
 
-- Per-base 9-table index store at the migrated base's runtime path:
+- Per-base 7-table index store at the migrated base's runtime path:
   `{knowledgeBaseDir}/{migratedBaseId}/.cherry/index.sqlite`
 - Built through the exact runtime open sequence — `openLibsqlIndexDriver` →
   `createKnowledgeIndexSchema` → `ensureIndexMeta` → `KnowledgeIndexStore.rebuildMaterial` —

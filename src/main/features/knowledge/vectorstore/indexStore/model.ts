@@ -3,10 +3,12 @@
  * CHECK constraints in schema.ts (§4) and shape the store's write contract.
  */
 
-export type MaterialOrigin = 'user' | 'processor' | 'agent' | 'captured' | 'discovered'
+import type { KnowledgeSearchMode } from '@shared/data/types/knowledge'
+
+export type MaterialOrigin = 'user' | 'processor' | 'captured'
 export type MaterialIndexPolicy = 'index' | 'suppress' | 'ignore'
 export type ContentTextFormat = 'markdown' | 'plain' | 'extracted_text'
-export type SearchUnitType = 'chunk' | 'heading_section' | 'page' | 'paragraph' | 'manual'
+export type SearchUnitType = 'chunk'
 
 /** One retrieval unit (chunk/section) with its offsets into the material's content. */
 export interface RebuildMaterialUnitInput {
@@ -63,8 +65,6 @@ export interface KnowledgeSearchUnit {
   charEnd: number
   text: string
 }
-
-export type KnowledgeSearchMode = 'hybrid' | 'vector' | 'bm25'
 
 export interface KnowledgeIndexSearchInput {
   queryText: string

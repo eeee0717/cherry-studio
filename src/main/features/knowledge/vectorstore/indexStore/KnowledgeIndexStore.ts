@@ -42,6 +42,15 @@ export class KnowledgeIndexStore {
     // Derive each unit's stable id and its body text + embedding hash from the
     // content offsets, so `content.text.slice(start, end) === body text` holds.
     const units = input.units.map((unit) => {
+      // slice() clamps out-of-range offsets silently, which would persist a lying
+      // charEnd alongside a shorter body — fail loud at write time instead of in
+      // whatever later reads the offsets (charStart bounds are covered by the
+      // schema CHECKs inside this same transaction).
+      if (unit.charEnd > input.content.text.length) {
+        throw new Error(
+          `Knowledge index unit ${unit.unitIndex} of material ${materialId} has charEnd ${unit.charEnd} beyond the content length ${input.content.text.length}`
+        )
+      }
       const bodyText = input.content.text.slice(unit.charStart, unit.charEnd)
       return {
         ...unit,
@@ -140,29 +149,17 @@ export class KnowledgeIndexStore {
         )
       }
 
-      // 6b. Self-heal guard against the listExistingEmbeddingHashes race (§10). The
-      //     caller reads existing hashes outside the base lock, so a concurrent GC
-      //     (step 8 / deleteMaterial) can delete a hash it reported as present between
-      //     that read and here — the job then skips re-embedding it, leaving a unit
-      //     with no vector. Verify every new unit body resolves to a stored embedding;
-      //     if one is missing, throw to roll back. The job's retry re-reads (the hash
-      //     is now absent), re-embeds it, and converges — never committing a unit
-      //     silently absent from vector search.
-      const missingEmbedding = await tx.execute(
-        `SELECT st.embedding_text_hash FROM search_text st
-         LEFT JOIN embedding e ON e.embedding_text_hash = st.embedding_text_hash
-         WHERE st.target_type = 'search_unit'
-           AND st.target_id IN (SELECT unit_id FROM search_unit WHERE material_id = ?)
-           AND e.embedding_text_hash IS NULL
-         LIMIT 1`,
-        [materialId]
-      )
-      if (missingEmbedding.rows.length > 0) {
-        throw new Error(
-          `Knowledge index rebuild for material ${materialId} is missing the embedding for hash ` +
-            `${missingEmbedding.rows[0].embedding_text_hash as string} (lost to a concurrent GC); retry will re-embed it`
-        )
-      }
+      // 6b. Coverage check: every unit's re-derived embedding hash must resolve to a
+      //     vector, or roll the rebuild back. This catches two failure modes:
+      //     (a) the caller hashes its chunk text while this store hashes the re-sliced
+      //         body, so an offset/hash mismatch would leave a unit silently absent
+      //         from vector search; and
+      //     (b) the listExistingEmbeddingHashes race — the caller reads existing hashes
+      //         outside the base lock, so a concurrent GC (step 8 / deleteMaterial) can
+      //         drop a hash it reported present before this rebuild writes, and the job
+      //         then skips re-embedding it. Failing loud rolls back; the job's retry
+      //         re-reads (the hash is now absent), re-embeds it, and converges.
+      await this.assertEmbeddingCoverage(tx, materialId, [...new Set(units.map((unit) => unit.embeddingTextHash))])
 
       // 7. Mark the material indexed and clear any prior failure summary.
       await tx.execute(
@@ -181,10 +178,10 @@ export class KnowledgeIndexStore {
 
   /**
    * Delete a material and everything derived from it. Removing the material row
-   * cascades to its `search_unit` (and `content_index_entry`); the units' body
-   * `search_text` is deleted explicitly first (no FK), which also clears the FTS
-   * index via the delete trigger. {@link collectIndexGarbage} then sweeps the
-   * `embedding` and `content` rows this delete orphaned, in the same transaction.
+   * cascades to its `search_unit`; the units' body `search_text` is deleted
+   * explicitly first (no FK), which also clears the FTS index via the delete
+   * trigger. {@link collectIndexGarbage} then sweeps the `embedding` and `content`
+   * rows this delete orphaned, in the same transaction.
    */
   async deleteMaterial(materialId: string): Promise<void> {
     await this.driver.transaction(async (tx) => {
@@ -225,10 +222,10 @@ export class KnowledgeIndexStore {
    * The job reads this outside the base mutation lock, then writes the rebuild
    * under it. {@link collectIndexGarbage} (run under that lock by rebuild/delete)
    * can drop a hash reported here as present, between this read and the rebuild
-   * write. rebuildMaterial closes that race: its self-heal guard rolls back if any
-   * new unit's hash lost its embedding, so the job retries, re-reads (the hash is
-   * now absent) and re-embeds it. A stale "present" therefore self-corrects rather
-   * than leaving a unit silently absent from vector search.
+   * write. rebuildMaterial closes that race: {@link assertEmbeddingCoverage} rolls
+   * the rebuild back if any new unit's hash lost its embedding, so the job retries,
+   * re-reads (the hash is now absent) and re-embeds it. A stale "present" therefore
+   * self-corrects rather than leaving a unit silently absent from vector search.
    */
   async listExistingEmbeddingHashes(hashes: string[]): Promise<Set<string>> {
     const existing = new Set<string>()
@@ -395,6 +392,27 @@ export class KnowledgeIndexStore {
     return result.rows.map((row) => toMatch(row, -Number(row.len)))
   }
 
+  /** Throw (rolling back the surrounding rebuild) if any unit hash has no embedding row. */
+  private async assertEmbeddingCoverage(tx: SqliteTransaction, materialId: string, hashes: string[]): Promise<void> {
+    const missing = new Set(hashes)
+    for (let i = 0; i < hashes.length; i += EMBEDDING_HASH_QUERY_BATCH) {
+      const batch = hashes.slice(i, i + EMBEDDING_HASH_QUERY_BATCH)
+      const placeholders = batch.map(() => '?').join(', ')
+      const result = await tx.execute(
+        `SELECT embedding_text_hash FROM embedding WHERE embedding_text_hash IN (${placeholders})`,
+        batch
+      )
+      for (const row of result.rows) {
+        missing.delete(row.embedding_text_hash as string)
+      }
+    }
+    if (missing.size > 0) {
+      throw new Error(
+        `Knowledge index rebuild for material ${materialId} left ${missing.size} unit embedding hash(es) without a vector (first: ${[...missing][0]})`
+      )
+    }
+  }
+
   private async deleteMaterialSearchText(tx: SqliteTransaction, materialId: string): Promise<void> {
     await tx.execute(
       `DELETE FROM search_text
@@ -407,11 +425,17 @@ export class KnowledgeIndexStore {
 
 /** Shape a single result row (shared by both lanes) with a precomputed score. */
 function toMatch(row: Record<string, SqlValue>, score: number): KnowledgeIndexSearchMatch {
+  // Every lane selects `st.text AS body` through an INNER JOIN on a NOT NULL
+  // column, so a missing body is store corruption — fail loudly like
+  // listMaterialUnits does instead of fabricating an empty result.
+  if (row.body == null) {
+    throw new Error(`Knowledge index store is missing the body text for unit ${row.unit_id as string}`)
+  }
   return {
     unitId: row.unit_id as string,
     materialId: row.material_id as string,
     unitIndex: Number(row.unit_index),
-    text: (row.body as string | null) ?? '',
+    text: row.body as string,
     score
   }
 }

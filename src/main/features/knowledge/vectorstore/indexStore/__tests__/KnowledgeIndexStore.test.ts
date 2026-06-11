@@ -184,6 +184,85 @@ describe('KnowledgeIndexStore', () => {
     expect(await count('search_unit')).toBe(2)
   })
 
+  it('rebuilding the same material with identical content is idempotent', async () => {
+    // The most common reindex scenario. Unit/search_text ids are deterministic
+    // (same material + content + offsets → same ids), so this only passes while
+    // the rebuild transaction deletes the old rows unconditionally — a future
+    // "skip when content unchanged" short-circuit that forgot the delete would
+    // explode here with PK/UNIQUE violations.
+    const input = buildInput('hello world wide', [
+      [0, 5],
+      [6, 16]
+    ])
+    await store.rebuildMaterial('m1', input)
+    await expect(store.rebuildMaterial('m1', input)).resolves.toBeUndefined()
+
+    const units = await store.listMaterialUnits('m1')
+    expect(units.map((u) => u.text)).toEqual(['hello', 'world wide'])
+    expect(await count('search_unit')).toBe(2)
+    expect(await count('search_text')).toBe(2)
+    expect(await count('content')).toBe(1)
+    expect(await count('embedding')).toBe(2)
+    expect(await ftsMatchCount('world')).toBe(1)
+  })
+
+  it('rejects a unit whose charEnd lies beyond the content text', async () => {
+    // slice() would clamp silently and persist the lying offset — the store must
+    // fail loud at write time instead of corrupting offset-based readers later.
+    await expect(store.rebuildMaterial('m1', buildInput('short', [[0, 99]]))).rejects.toThrow(
+      'beyond the content length'
+    )
+
+    expect(await count('material')).toBe(0)
+    expect(await count('search_unit')).toBe(0)
+  })
+
+  it('rolls back a rebuild that leaves a unit embedding hash without a vector', async () => {
+    await store.rebuildMaterial('m1', buildInput('keep this safe', [[0, 4]]))
+
+    // A caller that hashes different text than the store re-slices (offset/hash
+    // drift) supplies no vector for the unit's body — the coverage check must
+    // fail the transaction instead of leaving the unit invisible to vector search.
+    const drifted: RebuildMaterialInput = {
+      material: { relativePath: 'doc.md', origin: 'user', indexPolicy: 'index' },
+      content: { text: 'drifted body text', textFormat: 'markdown', normalizationVersion: 1 },
+      units: [{ unitType: 'chunk', unitIndex: 0, charStart: 0, charEnd: 7 }],
+      embeddings: [{ embeddingTextHash: hashEmbeddingText('not the sliced body'), vector: [0.1, 0.2, 0.3] }]
+    }
+    await expect(store.rebuildMaterial('m1', drifted)).rejects.toThrow('without a vector')
+
+    // Prior index intact (transaction rolled back).
+    const units = await store.listMaterialUnits('m1')
+    expect(units.map((u) => u.text)).toEqual(['keep'])
+  })
+
+  it('checks embedding coverage across query batches (>500 distinct hashes)', async () => {
+    // 501 distinct unit bodies cross the EMBEDDING_HASH_QUERY_BATCH (500)
+    // boundary, so a slice off-by-one in the batched coverage query would either
+    // falsely throw (a supplied hash dropped from a query) or falsely pass (a
+    // missing hash never checked). Pin both directions on a real database.
+    const words = Array.from({ length: 501 }, (_, i) => `w${String(i).padStart(3, '0')}`)
+    const text = words.join(' ')
+    const ranges: Array<[number, number]> = []
+    let offset = 0
+    for (const word of words) {
+      ranges.push([offset, offset + word.length])
+      offset += word.length + 1
+    }
+
+    // The 501st hash lands in the second batch; dropping its vector must fail.
+    const missingOne = buildInput(text, ranges)
+    missingOne.embeddings = missingOne.embeddings.filter(
+      (embedding) => embedding.embeddingTextHash !== hashEmbeddingText(words[500])
+    )
+    await expect(store.rebuildMaterial('m1', missingOne)).rejects.toThrow('without a vector')
+    expect(await count('material')).toBe(0)
+
+    await expect(store.rebuildMaterial('m1', buildInput(text, ranges))).resolves.toBeUndefined()
+    expect(await count('search_unit')).toBe(501)
+    expect(await count('embedding')).toBe(501)
+  })
+
   it('deletes a material and its derived rows, sweeping the now-orphaned embedding and content', async () => {
     await store.rebuildMaterial('m1', buildInput('the knowledge base', [[0, 18]]))
     expect(await ftsMatchCount('knowledge')).toBe(1)
@@ -258,26 +337,6 @@ describe('KnowledgeIndexStore', () => {
     expect(await count('content')).toBe(1)
     const units = await store.listMaterialUnits('m1')
     expect(units.map((u) => u.text)).toEqual(['replacement body'])
-  })
-
-  it('rolls back the rebuild when a new unit body has no backing embedding (self-heal guard)', async () => {
-    // Seed a good index so we can prove it survives the rejected rebuild.
-    await store.rebuildMaterial('m1', buildInput('safe original', [[0, 13]], 'a.md'))
-
-    // Simulate the listExistingEmbeddingHashes race: a unit whose hash is neither
-    // supplied nor already stored (a concurrent GC dropped it). The guard must reject.
-    const racey: RebuildMaterialInput = {
-      material: { relativePath: 'a.md', origin: 'user', indexPolicy: 'index' },
-      content: { text: 'body with no vector', textFormat: 'markdown', normalizationVersion: 1 },
-      units: [{ unitType: 'chunk', unitIndex: 0, charStart: 0, charEnd: 19 }],
-      embeddings: []
-    }
-    await expect(store.rebuildMaterial('m1', racey)).rejects.toThrow('missing the embedding')
-
-    // The prior index is intact (rolled back), and no orphan/partial rows leaked.
-    const units = await store.listMaterialUnits('m1')
-    expect(units.map((u) => u.text)).toEqual(['safe original'])
-    expect(await count('embedding')).toBe(1)
   })
 
   it('listExistingEmbeddingHashes reports only the hashes already stored', async () => {
