@@ -6,8 +6,9 @@ import path from 'node:path'
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { copyMock, ensureDirMock, removeMock, removeDirMock, lstatMock, errorMock } = vi.hoisted(() => ({
+const { copyMock, writeMock, ensureDirMock, removeMock, removeDirMock, lstatMock, errorMock } = vi.hoisted(() => ({
   copyMock: vi.fn(),
+  writeMock: vi.fn(),
   ensureDirMock: vi.fn(),
   removeMock: vi.fn(),
   removeDirMock: vi.fn(),
@@ -32,6 +33,7 @@ vi.mock('node:fs/promises', () => ({
 
 vi.mock('@main/utils/file/fs', () => ({
   copy: copyMock,
+  write: writeMock,
   ensureDir: ensureDirMock,
   remove: removeMock,
   removeDir: removeDirMock
@@ -43,7 +45,12 @@ const {
   getKnowledgeSourceRelativePath,
   toKnowledgeRelativePath,
   getProcessedMarkdownRelativePath,
+  withRelativePathSuffix,
+  dedupeKnowledgeRelativePath,
+  reserveUploadedFileRelativePath,
   copyFileIntoKnowledgeBaseAt,
+  writeFileIntoKnowledgeBaseAt,
+  collectKnowledgeReservedRelativePaths,
   deleteKnowledgeItemFiles,
   deleteKnowledgeItemFilesBestEffort
 } = await import('../pathStorage')
@@ -110,6 +117,61 @@ describe('pathStorage relative-path safety', () => {
     })
   })
 
+  describe('withRelativePathSuffix', () => {
+    it('inserts the suffix before the extension', () => {
+      expect(withRelativePathSuffix('report.pdf', 2)).toBe('report-2.pdf')
+      expect(withRelativePathSuffix('sub/report.pdf', 1)).toBe('sub/report-1.pdf')
+    })
+
+    it('appends the suffix when there is no extension', () => {
+      expect(withRelativePathSuffix('README', 3)).toBe('README-3')
+    })
+  })
+
+  describe('dedupeKnowledgeRelativePath', () => {
+    it('returns the name unchanged on the first use and reserves it', () => {
+      const used = new Set<string>()
+      expect(dedupeKnowledgeRelativePath('a.md', used)).toBe('a.md')
+      expect(used.has('a.md')).toBe(true)
+    })
+
+    it('inserts an incrementing numeric suffix on repeated collisions', () => {
+      const used = new Set<string>()
+      expect(dedupeKnowledgeRelativePath('a.md', used)).toBe('a.md')
+      expect(dedupeKnowledgeRelativePath('a.md', used)).toBe('a-1.md')
+      expect(dedupeKnowledgeRelativePath('a.md', used)).toBe('a-2.md')
+    })
+  })
+
+  describe('reserveUploadedFileRelativePath', () => {
+    it('keeps the original name when nothing collides and reserves it', () => {
+      const reserved = new Set<string>()
+      expect(reserveUploadedFileRelativePath(reserved, 'notes.md', false)).toBe('notes.md')
+      expect(reserved.has('notes.md')).toBe(true)
+    })
+
+    it('renames the file when its own name is taken', () => {
+      const reserved = new Set<string>(['notes.md'])
+      expect(reserveUploadedFileRelativePath(reserved, 'notes.md', false)).toBe('notes-1.md')
+    })
+
+    it('also reserves the derived .md artifact when requested', () => {
+      const reserved = new Set<string>()
+      expect(reserveUploadedFileRelativePath(reserved, 'brief.pdf', true)).toBe('brief.pdf')
+      expect(reserved.has('brief.pdf')).toBe(true)
+      expect(reserved.has('brief.md')).toBe(true)
+    })
+
+    it('renames the source so its artifact stops colliding even when the source name is free', () => {
+      // brief.pdf already reserved brief.md; brief.docx is free but its artifact
+      // brief.md is not, so the source is bumped to brief-1.docx (artifact brief-1.md).
+      const reserved = new Set<string>(['brief.pdf', 'brief.md'])
+      expect(reserveUploadedFileRelativePath(reserved, 'brief.docx', true)).toBe('brief-1.docx')
+      expect(reserved.has('brief-1.docx')).toBe(true)
+      expect(reserved.has('brief-1.md')).toBe(true)
+    })
+  })
+
   describe('copyFileIntoKnowledgeBaseAt', () => {
     beforeEach(() => {
       vi.clearAllMocks()
@@ -139,6 +201,61 @@ describe('pathStorage relative-path safety', () => {
         'Knowledge file already exists'
       )
       expect(copyMock).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('writeFileIntoKnowledgeBaseAt', () => {
+    beforeEach(() => {
+      vi.clearAllMocks()
+      lstatMock.mockRejectedValue(enoent())
+      ensureDirMock.mockResolvedValue(undefined)
+      writeMock.mockResolvedValue(undefined)
+    })
+
+    it('rejects an unsafe target relative path before any filesystem write', async () => {
+      await expect(writeFileIntoKnowledgeBaseAt(BASE_ID, '../escape.md', 'hi')).rejects.toThrow(
+        'Invalid knowledge relative path'
+      )
+      expect(writeMock).not.toHaveBeenCalled()
+    })
+
+    it('creates parent directories and writes the content for a nested target', async () => {
+      const relativePath = 'docs/sub/page.md'
+      await expect(writeFileIntoKnowledgeBaseAt(BASE_ID, relativePath, '# hi')).resolves.toBe(relativePath)
+      const destPath = path.join(BASE_DIR, relativePath)
+      expect(ensureDirMock).toHaveBeenCalledWith(path.dirname(destPath))
+      expect(writeMock).toHaveBeenCalledWith(destPath, '# hi')
+    })
+
+    it('throws when the target already exists', async () => {
+      lstatMock.mockResolvedValueOnce({})
+      await expect(writeFileIntoKnowledgeBaseAt(BASE_ID, 'page.md', '# hi')).rejects.toThrow(
+        'Knowledge file already exists'
+      )
+      expect(writeMock).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('collectKnowledgeReservedRelativePaths', () => {
+    it('collects file source and indexed-artifact paths and url snapshot paths', () => {
+      const reserved = collectKnowledgeReservedRelativePaths([
+        { type: 'file', data: { relativePath: 'a.pdf', indexedRelativePath: 'a.md' } },
+        { type: 'url', data: { source: 'https://x', url: 'https://x', relativePath: 'x.md' } },
+        { type: 'note', data: { source: 'n', content: 'body' } },
+        { type: 'directory', data: { source: 'd', path: '/d' } }
+      ])
+
+      expect(reserved).toEqual(new Set(['a.pdf', 'a.md', 'x.md']))
+    })
+
+    it('ignores items with non-string or missing path fields', () => {
+      const reserved = collectKnowledgeReservedRelativePaths([
+        { type: 'url', data: { source: 'https://x', url: 'https://x' } },
+        { type: 'file', data: null as unknown as object },
+        { type: 'file', data: { relativePath: 42 } as unknown as object }
+      ])
+
+      expect(reserved.size).toBe(0)
     })
   })
 })

@@ -13,8 +13,10 @@ KnowledgeBase/{baseId}/
   .cherry/index.sqlite   # 每库隐藏索引库（派生索引，可重建）
   paper.pdf              # 用户上传源文件
   paper.md               # 处理器产物（与源文件相邻）
-  captures/{url,note}/   # URL / 笔记 Markdown 快照（PR B）
+  page-title.md          # URL 快照：首次索引时落根目录（标题 slug 命名，冲突自动改名 -1/-2）（PR B）
 ```
+
+> URL 快照平铺在 base 根目录（不再用 `captures/` 子目录）；命名取页面首个标题 slug，与上传文件共用同一套去重改名。note 暂仍 inline `data.content`（未落快照）。
 
 - `.cherry/**` 为保留前缀，不进 `material` 表。
 - `material.relative_path` 是 base 目录下真实相对路径；路径安全由主进程 `assertSafeKnowledgeRelativePath` 把关（zod 只做形状校验）。
@@ -22,7 +24,7 @@ KnowledgeBase/{baseId}/
 
 ## 3. 数据模型
 
-`knowledge_item.data` 持久化本地 `relativePath` 形态；外部 path / URL / note 内容只是命令输入。file 索引读取路径为 `indexedRelativePath ?? relativePath`。url/note 的 `.md` 快照模型属 PR B（当前 url 仍联网抓取、note 仍 inline content）。
+`knowledge_item.data` 持久化本地 `relativePath` 形态；外部 path / URL / note 内容只是命令输入。file 索引读取路径为 `indexedRelativePath ?? relativePath`。URL 改为**快照模型（PR B 已落地）**：首次索引时抓取一次落根目录 `.md`，把 `relativePath` 写回 `data`，之后离线读快照；刷新=重抓覆盖。note 暂未动（仍 inline `data.content`）。
 
 ## 4. index.sqlite 表结构（9 张表）
 
@@ -104,7 +106,9 @@ interface KnowledgeIndexStore {
 
 ### 5.2 rebuildMaterial 原子替换
 
-单写事务内完成：upsert material/content → 删旧 `search_unit`/`search_text` → 插新 → 同步 FTS → 插缺失 embedding → 更新 material 元数据。不能出现旧新 chunk 混合可见。删除旧 `search_text` 后**不能直接删 embedding**（可能被共享），孤儿向量交后续 GC（PR B/C，须在 base mutation lock 内）。
+单写事务内完成：upsert material/content → 删旧 `search_unit`/`search_text` → 插新 → 同步 FTS → 插缺失 embedding → 更新 material 元数据 → **锁内 GC 清扫**。不能出现旧新 chunk 混合可见。删除旧 `search_text` 后**不能直接删 embedding**（可能被共享），改在同一写事务末尾按引用计数清扫（`deleteMaterial` 同理）：`embedding` 无任何 `search_text` 引用即删；`content` 既不被 `material.current_content_hash`（FK NO ACTION）也不被 `search_unit.content_hash`（FK CASCADE）引用才删。调用方均已在 base mutation lock 内（PR B 已落地）。
+
+**自愈守卫（R-Q8）**：A4 的 `listExistingEmbeddingHashes` 在 base lock **之外**预读，与并发 delete 存在窄竞态窗口（预读到的 hash 可能在本次 rebuild 写入前被 GC 删掉）。故 rebuild 写事务在插完 embedding 后，校验新 `search_text` 引用的每个 `embedding_text_hash` 都已落库，缺失即 `throw` 回滚——旧索引保全，靠 job 重试（`maxAttempts=3`）重读重嵌自动收敛；最坏可见 failed item，绝不静默丢向量。
 
 **决议 A4（embedding 复用）**：按「文字指纹（`embedding_text_hash`）+ 模型 + 维度」全等复用已存向量，只 embed 索引中缺失的 hash——重索引未变内容不再花 embedding API 钱。
 
@@ -149,6 +153,6 @@ chunk body 必须是 `content.text` 的逐字 slice（自定义 offset splitter 
 
 ## 7. 后续工作
 
-- **PR B**：迁移器写 9 表终态、url/note 落 `.md` 快照、冲突「保留副本（自动改名）」、restore 复制已处理 md、孤儿 embedding/content GC。
+- **PR B**：迁移器写 9 表终态、URL 落 `.md` 快照（首次索引时抓取，note 暂未动仍 inline）、冲突「保留副本（自动改名）」、restore 复制已处理 md 与 URL 快照（有快照离线还原、无快照首次索引重抓）、孤儿 embedding/content 锁内 GC + rebuild 自愈守卫。
 - **PR C（v2.x）**：material-level 结果 + locator/read、`content_index_entry` 生成、kb__read / kb__tree / kb__manage 工具面、BM25-only 降级。
 - 完整 PR 拆分、测试矩阵、风险清单与全部 as-built 注记见飞书完整版 §15–§17。

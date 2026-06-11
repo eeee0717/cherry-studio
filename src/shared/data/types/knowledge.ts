@@ -235,7 +235,16 @@ export type FileItemData = z.infer<typeof FileItemDataSchema>
  * URL item data.
  */
 export const UrlItemDataSchema = KnowledgeItemSharedSchema.extend({
-  url: z.string().trim().min(1).describe('URL to read and index.')
+  url: z.string().trim().min(1).describe('URL to read and index.'),
+  // Written lazily by main on first index/refresh, never by raw caller input
+  // (add omits it). Same base-relative, POSIX-normalized, no-traversal invariant
+  // as FileItemData.relativePath, enforced at the filesystem boundary.
+  relativePath: z
+    .string()
+    .trim()
+    .min(1)
+    .optional()
+    .describe('Knowledge-base-relative path for the captured URL snapshot markdown, written on first index.')
 })
 
 /**
@@ -526,9 +535,10 @@ const CreateKnowledgeItemBaseSchema = z.strictObject({
   groupId: KnowledgeItemIdSchema.nullable().optional()
 })
 
-// Members shared verbatim by the persisted-create and runtime-add unions. Only
-// the `file` member differs between the two (persisted relativePath vs runtime
-// absolute path), so the non-file members are declared once and reused.
+// Members shared verbatim by the persisted-create and runtime-add unions. The
+// `file` and `url` members differ between the two (persisted base-relative paths
+// vs runtime absolute source paths), so they are declared separately below; the
+// remaining members are declared once and reused.
 const UrlItemMemberSchema = CreateKnowledgeItemBaseSchema.extend({
   type: z.literal('url'),
   data: UrlItemDataSchema
@@ -554,7 +564,29 @@ export const CreateKnowledgeItemSchema = z.discriminatedUnion('type', [
 export type CreateKnowledgeItemDto = z.infer<typeof CreateKnowledgeItemSchema>
 
 const RuntimeFileItemDataSchema = KnowledgeItemSharedSchema.extend({
-  path: AbsolutePathSchema.describe('Absolute source path selected by the user before Knowledge copies it.')
+  path: AbsolutePathSchema.describe('Absolute source path selected by the user before Knowledge copies it.'),
+  // Restore-only: absolute path to an already-produced processor artifact (e.g. MinerU
+  // Markdown) in the source base. When present, Knowledge copies it in alongside the
+  // source file and indexes from it directly, skipping the file processor.
+  indexedPath: AbsolutePathSchema.optional().describe(
+    'Absolute path to an already-processed artifact to copy in and index from, skipping the file processor.'
+  )
+})
+
+const RuntimeUrlItemDataSchema = KnowledgeItemSharedSchema.extend({
+  url: z.string().trim().min(1).describe('URL to read and index.'),
+  // Restore-only: absolute path to a captured snapshot markdown in the source base.
+  // When present, Knowledge copies it in and pins the item to it so the first index
+  // reads the snapshot offline instead of re-fetching the (possibly changed or dead)
+  // live page. Omitted by a normal add, which captures lazily on first index.
+  snapshotPath: AbsolutePathSchema.optional().describe(
+    'Absolute path to a captured URL snapshot markdown to copy in, skipping the live re-fetch.'
+  )
+})
+
+const RuntimeUrlItemMemberSchema = CreateKnowledgeItemBaseSchema.extend({
+  type: z.literal('url'),
+  data: RuntimeUrlItemDataSchema
 })
 
 export const KnowledgeAddItemInputSchema = z.discriminatedUnion('type', [
@@ -562,7 +594,7 @@ export const KnowledgeAddItemInputSchema = z.discriminatedUnion('type', [
     type: z.literal('file'),
     data: RuntimeFileItemDataSchema
   }),
-  UrlItemMemberSchema,
+  RuntimeUrlItemMemberSchema,
   NoteItemMemberSchema,
   DirectoryItemMemberSchema
 ])

@@ -29,11 +29,12 @@ import { isContainerKnowledgeItem } from './utils/items'
 import { planKnowledgeItemSource } from './utils/sources/sourcePlanning'
 import {
   assertKnowledgeFileTargetAvailable,
-  copyFileIntoKnowledgeBase,
+  copyFileIntoKnowledgeBaseAt,
   deleteKnowledgeItemFilesBestEffort,
   getKnowledgeBaseFilePath,
   getKnowledgeSourceRelativePath,
-  getProcessedMarkdownRelativePath
+  getProcessedMarkdownRelativePath,
+  reserveUploadedFileRelativePath
 } from './utils/storage/pathStorage'
 
 const logger = loggerService.withContext('Knowledge:WorkflowService')
@@ -54,12 +55,13 @@ export class KnowledgeWorkflowService {
 
     await this.knowledgeLockManager.withBaseMutationLock(base.id, async () => {
       try {
+        // Reserve every existing on-disk path up front, then let each new file
+        // claim a collision-free name (auto-renaming with a numeric suffix)
+        // against the same growing set, so a same-named batch add no longer
+        // throws — earlier inputs are visible when deduping later ones.
         const reservedPaths = await this.loadReservedKnowledgeFilePaths(base.id, base.fileProcessorId)
         for (const input of inputs) {
-          this.reserveRuntimeAddItemInputPaths(base.fileProcessorId, input, reservedPaths)
-        }
-        for (const input of inputs) {
-          const createInput = await this.prepareRuntimeAddItemInput(base.id, input)
+          const createInput = await this.prepareRuntimeAddItemInput(base.id, base.fileProcessorId, input, reservedPaths)
           if (createInput.type === 'file') {
             copiedFileItems.push(createInput)
           }
@@ -295,13 +297,51 @@ export class KnowledgeWorkflowService {
 
   private async prepareRuntimeAddItemInput(
     baseId: string,
-    input: KnowledgeAddItemInput
+    fileProcessorId: string | null | undefined,
+    input: KnowledgeAddItemInput,
+    reservedPaths: Set<string>
   ): Promise<CreateKnowledgeItemDto> {
+    if (input.type === 'url') {
+      if (!input.data.snapshotPath) {
+        return input
+      }
+      // Restore: copy the captured snapshot markdown into this base under a
+      // collision-free name and pin the item to it, so the first index reads the
+      // snapshot offline (see ensureUrlSnapshot) instead of re-fetching the page.
+      const snapshotName = getKnowledgeSourceRelativePath(input.data.snapshotPath)
+      const relativePath = reserveUploadedFileRelativePath(reservedPaths, snapshotName, false)
+      await copyFileIntoKnowledgeBaseAt(baseId, input.data.snapshotPath, relativePath)
+      return {
+        groupId: input.groupId,
+        type: 'url',
+        data: { source: input.data.source, url: input.data.url, relativePath }
+      }
+    }
+
     if (input.type !== 'file') {
       return input
     }
 
-    const relativePath = await copyFileIntoKnowledgeBase(baseId, input.data.path)
+    const fileName = getKnowledgeSourceRelativePath(input.data.path)
+    // A restore that carries a processed artifact reserves the artifact slot too, even if
+    // the destination base has no processor configured, so the copied `.md` cannot collide.
+    const reserveArtifact =
+      needsProcessedArtifactReservation(fileProcessorId, fileName) || Boolean(input.data.indexedPath)
+    const relativePath = reserveUploadedFileRelativePath(reservedPaths, fileName, reserveArtifact)
+    await copyFileIntoKnowledgeBaseAt(baseId, input.data.path, relativePath)
+
+    if (input.data.indexedPath) {
+      // Copy the already-processed artifact next to the source under the reserved name
+      // and pin the item to it, so indexing skips the file processor (see needsFileProcessing).
+      const indexedRelativePath = getProcessedMarkdownRelativePath(relativePath)
+      await copyFileIntoKnowledgeBaseAt(baseId, input.data.indexedPath, indexedRelativePath)
+      return {
+        groupId: input.groupId,
+        type: 'file',
+        data: { source: input.data.source, relativePath, indexedRelativePath }
+      }
+    }
+
     return {
       groupId: input.groupId,
       type: 'file',
@@ -309,22 +349,6 @@ export class KnowledgeWorkflowService {
         source: input.data.source,
         relativePath
       }
-    }
-  }
-
-  private reserveRuntimeAddItemInputPaths(
-    fileProcessorId: string | null | undefined,
-    input: KnowledgeAddItemInput,
-    reservedPaths: Set<string>
-  ): void {
-    if (input.type !== 'file') {
-      return
-    }
-
-    const relativePath = getKnowledgeSourceRelativePath(input.data.path)
-    this.reserveKnowledgeFilePath(reservedPaths, relativePath)
-    if (needsProcessedArtifactReservation(fileProcessorId, relativePath)) {
-      this.reserveKnowledgeFilePath(reservedPaths, getProcessedMarkdownRelativePath(relativePath))
     }
   }
 
@@ -349,14 +373,6 @@ export class KnowledgeWorkflowService {
     }
 
     return reservedPaths
-  }
-
-  private reserveKnowledgeFilePath(reservedPaths: Set<string>, relativePath: string): void {
-    if (reservedPaths.has(relativePath)) {
-      throw new Error(`Knowledge file already exists: ${relativePath}`)
-    }
-
-    reservedPaths.add(relativePath)
   }
 
   private async assertKnowledgeRelativePathNotReserved(

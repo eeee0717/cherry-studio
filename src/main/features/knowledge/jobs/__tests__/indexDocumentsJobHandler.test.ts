@@ -3,19 +3,23 @@ import { describe, expect, it } from 'vitest'
 import { hashEmbeddingText } from '../../vectorstore/indexStore/hashing'
 import type { RebuildMaterialInput } from '../../vectorstore/indexStore/model'
 import {
+  captureUrlSnapshotFileMock,
   createAbortedCtx,
   createCtx,
   createFileItem,
   createIndexDocumentsJobHandler,
   createJobSnapshot,
   createNoteItem,
+  createUrlItem,
   embedKnowledgeTextsMock,
   fakeEmbedVector,
+  fetchKnowledgeWebPageMock,
   FILE_ITEM_ID,
   getJobMock,
   knowledgeBaseGetByIdMock,
   knowledgeItemGetByIdMock,
   knowledgeItemUpdateStatusMock,
+  knowledgeItemUpdateUrlSnapshotRelativePathMock,
   knowledgeLockManager,
   listExistingEmbeddingHashesMock,
   loadKnowledgeItemDocumentsMock,
@@ -208,10 +212,7 @@ describe('index-documents job handler', () => {
       })
     )
 
-    expect(loadKnowledgeItemDocumentsMock).toHaveBeenCalledWith(
-      expect.objectContaining({ id: FILE_ITEM_ID }),
-      expect.any(AbortSignal)
-    )
+    expect(loadKnowledgeItemDocumentsMock).toHaveBeenCalledWith(expect.objectContaining({ id: FILE_ITEM_ID }))
   })
 
   it('completes with empty vectors when the reader returns no documents', async () => {
@@ -265,6 +266,76 @@ describe('index-documents job handler', () => {
     expect(knowledgeBaseGetByIdMock).not.toHaveBeenCalled()
     expect(rebuildMaterialMock).not.toHaveBeenCalled()
     expect(knowledgeItemUpdateStatusMock).not.toHaveBeenCalledWith(NOTE_ITEM_ID, 'completed')
+  })
+
+  it('captures a URL snapshot on first index, persists its relativePath, and reads it offline', async () => {
+    const handler = createIndexDocumentsJobHandler(knowledgeLockManager as never)
+    // A freshly added / migrated URL has no snapshot yet (returned both at load
+    // time and at the in-lock re-read).
+    knowledgeItemGetByIdMock.mockResolvedValue(createUrlItem('url-1'))
+    captureUrlSnapshotFileMock.mockResolvedValue('example-page.md')
+
+    await handler.execute(createCtx({ baseId: 'kb-1', itemId: 'url-1', parentJobId: null }))
+
+    // Fetched exactly once, snapshot written, relativePath persisted.
+    expect(fetchKnowledgeWebPageMock).toHaveBeenCalledTimes(1)
+    expect(fetchKnowledgeWebPageMock).toHaveBeenCalledWith('https://example.com', expect.anything())
+    expect(captureUrlSnapshotFileMock).toHaveBeenCalledWith(
+      'kb-1',
+      'https://example.com',
+      '# Example page\n\nbody text',
+      expect.any(Set)
+    )
+    expect(knowledgeItemUpdateUrlSnapshotRelativePathMock).toHaveBeenCalledWith('url-1', 'example-page.md')
+    // The reader receives the item carrying the freshly captured snapshot path.
+    expect(loadKnowledgeItemDocumentsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'url-1', data: expect.objectContaining({ relativePath: 'example-page.md' }) })
+    )
+  })
+
+  it('does not fetch a URL that already has a captured snapshot', async () => {
+    const handler = createIndexDocumentsJobHandler(knowledgeLockManager as never)
+    knowledgeItemGetByIdMock.mockResolvedValue(createUrlItem('url-1', 'cached.md'))
+
+    await handler.execute(createCtx({ baseId: 'kb-1', itemId: 'url-1', parentJobId: null }))
+
+    expect(fetchKnowledgeWebPageMock).not.toHaveBeenCalled()
+    expect(captureUrlSnapshotFileMock).not.toHaveBeenCalled()
+    expect(knowledgeItemUpdateUrlSnapshotRelativePathMock).not.toHaveBeenCalled()
+    expect(loadKnowledgeItemDocumentsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ relativePath: 'cached.md' }) })
+    )
+  })
+
+  it('skips the snapshot write when another job captured it while this one fetched', async () => {
+    const handler = createIndexDocumentsJobHandler(knowledgeLockManager as never)
+    // Load sees no snapshot; the in-lock re-read sees one a concurrent job wrote.
+    knowledgeItemGetByIdMock
+      .mockResolvedValueOnce(createUrlItem('url-1'))
+      .mockResolvedValueOnce(createUrlItem('url-1', 'raced.md'))
+
+    await handler.execute(createCtx({ baseId: 'kb-1', itemId: 'url-1', parentJobId: null }))
+
+    // Fetched before the lock, but the duplicate write/persist is skipped.
+    expect(fetchKnowledgeWebPageMock).toHaveBeenCalledTimes(1)
+    expect(captureUrlSnapshotFileMock).not.toHaveBeenCalled()
+    expect(knowledgeItemUpdateUrlSnapshotRelativePathMock).not.toHaveBeenCalled()
+    expect(loadKnowledgeItemDocumentsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ relativePath: 'raced.md' }) })
+    )
+  })
+
+  it('fails the index when a URL fetch returns empty markdown', async () => {
+    const handler = createIndexDocumentsJobHandler(knowledgeLockManager as never)
+    knowledgeItemGetByIdMock.mockResolvedValue(createUrlItem('url-1'))
+    fetchKnowledgeWebPageMock.mockResolvedValueOnce('')
+
+    await expect(handler.execute(createCtx({ baseId: 'kb-1', itemId: 'url-1', parentJobId: null }))).rejects.toThrow(
+      'empty markdown'
+    )
+
+    expect(captureUrlSnapshotFileMock).not.toHaveBeenCalled()
+    expect(knowledgeItemUpdateStatusMock).not.toHaveBeenCalledWith('url-1', 'completed')
   })
 
   it('onSettled skips failed status when the item is deleting', async () => {

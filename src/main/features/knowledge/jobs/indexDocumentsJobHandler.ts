@@ -5,7 +5,6 @@ import { knowledgeBaseService } from '@data/services/KnowledgeBaseService'
 import { knowledgeItemService } from '@data/services/KnowledgeItemService'
 import { loggerService } from '@logger'
 import type { JobContext, JobHandler } from '@main/core/job/types'
-import { getFileExt } from '@main/utils/file'
 import type { KnowledgeBase } from '@shared/data/types/knowledge'
 
 import type { KnowledgeLockManager } from '../KnowledgeLockManager'
@@ -14,9 +13,18 @@ import { knowledgeQueueName, reportKnowledgeProgress, toKnowledgeBaseId } from '
 import type { IndexableKnowledgeItem } from '../types/items'
 import { type ChunkedKnowledgeContent, chunkKnowledgeDocuments } from '../utils/indexing/chunk'
 import { embedKnowledgeTexts } from '../utils/indexing/embed'
+import {
+  toContentTextFormat,
+  toMaterialFileExt,
+  toMaterialOrigin,
+  toMaterialRelativePath
+} from '../utils/indexing/materialFields'
 import { isIndexableKnowledgeItem } from '../utils/items'
+import { fetchKnowledgeWebPage } from '../utils/sources/url'
+import { captureUrlSnapshotFile } from '../utils/sources/urlSnapshot'
+import { collectKnowledgeReservedRelativePaths } from '../utils/storage/pathStorage'
 import { hashEmbeddingText } from '../vectorstore/indexStore/hashing'
-import type { ContentTextFormat, MaterialOrigin, RebuildMaterialInput } from '../vectorstore/indexStore/model'
+import type { RebuildMaterialInput } from '../vectorstore/indexStore/model'
 import type { KnowledgeIndexDocumentsPayload } from './jobTypes'
 import { isDataApiNotFoundError, markKnowledgeItemFailedOnSettled } from './utils/settled'
 
@@ -58,8 +66,11 @@ export function createIndexDocumentsJobHandler(
         await knowledgeItemService.updateStatus(ctx.input.itemId, 'reading')
       })
 
-      // Read and chunk outside the base lock; these phases can be slow and do not mutate shared state.
-      const documents = await readItemDocuments(ctx, item)
+      // Capture a URL's snapshot on first index (fetch outside the lock, persist
+      // its relativePath under it), then read every item from disk. Read and chunk
+      // outside the base lock; these phases can be slow and do not mutate shared state.
+      const readableItem = await ensureUrlSnapshot(ctx, item, knowledgeLockManager)
+      const documents = await readItemDocuments(ctx, readableItem)
       const chunked = chunkItemDocuments(base, documents)
       if (chunked.chunks.length === 0) {
         // Deliberate: the item still completes (an empty material is written) so the
@@ -133,7 +144,45 @@ async function readItemDocuments(
   item: IndexableKnowledgeItem
 ): Promise<LoadedDocuments> {
   ctx.signal.throwIfAborted()
-  return await loadKnowledgeItemDocuments(item, ctx.signal)
+  return await loadKnowledgeItemDocuments(item)
+}
+
+/**
+ * Ensure a URL item has an on-disk snapshot before it is read. A URL without a
+ * `relativePath` (freshly added or migrated from v1) is fetched once here, the
+ * markdown written to a base file, and its `relativePath` persisted — so this
+ * and every later reindex read the snapshot offline. The fetch runs outside the
+ * base mutation lock; only the name allocation, file write, and persistence run
+ * under it, so concurrent captures in the same base cannot pick the same path.
+ * Non-URL items, and URLs that already have a snapshot, pass straight through.
+ */
+async function ensureUrlSnapshot(
+  ctx: JobContext<KnowledgeIndexDocumentsPayload>,
+  item: IndexableKnowledgeItem,
+  knowledgeLockManager: KnowledgeLockManager
+): Promise<IndexableKnowledgeItem> {
+  if (item.type !== 'url' || item.data.relativePath) {
+    return item
+  }
+
+  const markdown = await fetchKnowledgeWebPage(item.data.url, ctx.signal)
+  if (!markdown) {
+    throw new Error(`Knowledge URL returned empty markdown: ${item.data.url}`)
+  }
+
+  return await knowledgeLockManager.withBaseMutationLock(ctx.input.baseId, async () => {
+    const latest = await knowledgeItemService.getById(ctx.input.itemId)
+    if (latest.type !== 'url' || latest.data.relativePath) {
+      // Another job captured the snapshot (or the item changed) while we fetched.
+      return isIndexableKnowledgeItem(latest) ? latest : item
+    }
+    const reservedPaths = collectKnowledgeReservedRelativePaths(
+      await knowledgeItemService.getItemsByBaseId(ctx.input.baseId)
+    )
+    const relativePath = await captureUrlSnapshotFile(item.baseId, item.data.url, markdown, reservedPaths)
+    const updated = await knowledgeItemService.updateUrlSnapshotRelativePath(ctx.input.itemId, relativePath)
+    return isIndexableKnowledgeItem(updated) ? updated : item
+  })
 }
 
 function chunkItemDocuments(base: KnowledgeBase, documents: LoadedDocuments): ChunkedKnowledgeContent {
@@ -197,53 +246,6 @@ async function buildRebuildMaterialInput(
     })),
     embeddings: missing.map(([embeddingTextHash], index) => ({ embeddingTextHash, vector: vectors[index] }))
   }
-}
-
-/** A material's stable relative path: the file's path for files, else the item id (notes/URLs have no file). */
-function toMaterialRelativePath(item: IndexableKnowledgeItem): string {
-  if (item.type === 'file') {
-    return item.data.indexedRelativePath ?? item.data.relativePath
-  }
-  return item.id
-}
-
-/**
- * Material provenance (the index store's `origin` enum). A file indexed through a
- * processor artifact — MinerU Markdown, addressed by `indexedRelativePath` — is a
- * 'processor' product; a file indexed directly is user-supplied; url/note are
- * 'captured' snapshots. See knowledge-technical-design.md §4.2.
- */
-function toMaterialOrigin(item: IndexableKnowledgeItem): MaterialOrigin {
-  if (item.type !== 'file') {
-    return 'captured'
-  }
-  return item.data.indexedRelativePath ? 'processor' : 'user'
-}
-
-/**
- * Format of the content that is actually indexed. The reader resolves a file to
- * `indexedRelativePath ?? relativePath`, so a `.md` there (a processor's Markdown
- * output or a Markdown upload) is 'markdown'; any other file is reader-extracted
- * text; url/note snapshots are Markdown.
- */
-function toContentTextFormat(item: IndexableKnowledgeItem): ContentTextFormat {
-  if (item.type !== 'file') {
-    return 'markdown'
-  }
-  const indexedPath = item.data.indexedRelativePath ?? item.data.relativePath
-  return getFileExt(indexedPath).toLowerCase() === '.md' ? 'markdown' : 'extracted_text'
-}
-
-/**
- * Lower-cased extension of the indexed file (including the dot, e.g. `.pdf`), or
- * undefined for url/note materials whose relative path is a virtual id, not a file.
- */
-function toMaterialFileExt(item: IndexableKnowledgeItem): string | undefined {
-  if (item.type !== 'file') {
-    return undefined
-  }
-  const indexedPath = item.data.indexedRelativePath ?? item.data.relativePath
-  return getFileExt(indexedPath).toLowerCase() || undefined
 }
 
 async function writeItemMaterial(

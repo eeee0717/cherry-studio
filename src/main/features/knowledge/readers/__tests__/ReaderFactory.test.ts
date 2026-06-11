@@ -135,7 +135,8 @@ function createUrlItem(): KnowledgeItemOf<'url'> {
     updatedAt: '2026-04-03T00:00:00.000Z',
     data: {
       source: 'https://example.com',
-      url: 'https://example.com'
+      url: 'https://example.com',
+      relativePath: 'example-page.md'
     }
   }
 }
@@ -254,43 +255,25 @@ describe('loadKnowledgeItemDocuments', () => {
     })
   })
 
-  it('fetches markdown from the local knowledge web provider and splits it into documents', async () => {
-    fetchMock.mockResolvedValue(new Response('# Example Page\n\nHello knowledge', { status: 200 }))
-
+  it('reads a url item from its captured snapshot via the markdown reader', async () => {
     const item = createUrlItem()
     const docs = await loadKnowledgeItemDocuments(item)
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      'https://r.jina.ai/https://example.com',
-      expect.objectContaining({
-        signal: expect.any(AbortSignal),
-        headers: {
-          'X-Retain-Images': 'none',
-          'X-Return-Format': 'markdown'
-        }
-      })
-    )
+    // The reader never fetches; the indexing job's ensure-snapshot step does.
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(readerSpies.markdown).toHaveBeenCalledWith('/mock/feature.knowledgebase.data/base-1/example-page.md')
     expect(docs).toHaveLength(1)
     expect(docs[0]).toMatchObject({
-      text: '# Example Page\n\nHello knowledge',
       metadata: {
         source: 'https://example.com'
       }
     })
   })
 
-  it('throws when the knowledge web provider returns empty markdown', async () => {
-    fetchMock.mockResolvedValue(new Response('   ', { status: 200 }))
+  it('throws when a url item has no captured snapshot', async () => {
+    const item = { ...createUrlItem(), data: { source: 'https://example.com', url: 'https://example.com' } }
 
-    const item = createUrlItem()
-
-    await expect(loadKnowledgeItemDocuments(item)).rejects.toThrow(
-      'Knowledge URL returned empty markdown: https://example.com'
-    )
-    expect(loggerWarnMock).toHaveBeenCalledWith('Knowledge URL reader received empty markdown', {
-      itemId: 'url-1',
-      sourceUrl: 'https://example.com'
-    })
+    await expect(loadKnowledgeItemDocuments(item)).rejects.toThrow('has no captured snapshot to read')
   })
 
   it('throws for unsupported directory items', async () => {

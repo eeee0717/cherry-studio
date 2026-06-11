@@ -3,17 +3,29 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { knowledgeBaseTable, knowledgeItemTable } from '@data/db/schemas/knowledge'
-import { type Client, createClient } from '@libsql/client'
+import { createClient } from '@libsql/client'
 import { loggerService } from '@logger'
+import { DOCUMENT_SEPARATOR } from '@main/features/knowledge/utils/indexing/chunk'
+import {
+  type MaterialFieldSource,
+  toContentTextFormat,
+  toMaterialFileExt,
+  toMaterialOrigin,
+  toMaterialRelativePath
+} from '@main/features/knowledge/utils/indexing/materialFields'
+import { hashChunkerConfig, hashEmbeddingText } from '@main/features/knowledge/vectorstore/indexStore/hashing'
+import { ensureIndexMeta, NORMALIZATION_VERSION } from '@main/features/knowledge/vectorstore/indexStore/indexMeta'
+import { KnowledgeIndexStore } from '@main/features/knowledge/vectorstore/indexStore/KnowledgeIndexStore'
+import { openLibsqlIndexDriver } from '@main/features/knowledge/vectorstore/indexStore/LibsqlDriver'
+import { libsqlVectorIndex } from '@main/features/knowledge/vectorstore/indexStore/LibsqlVectorIndex'
+import type { RebuildMaterialInput } from '@main/features/knowledge/vectorstore/indexStore/model'
+import { createKnowledgeIndexSchema } from '@main/features/knowledge/vectorstore/indexStore/schema'
 import type { ExecuteResult, PrepareResult, ValidateResult, ValidationError } from '@shared/data/migration/v2/types'
 import {
   KNOWLEDGE_BASE_ERROR_MISSING_EMBEDDING_MODEL,
-  KnowledgeChunkMetadataSchema,
   type KnowledgeItemData,
   type KnowledgeItemType
 } from '@shared/data/types/knowledge'
-import { estimateTokenCount } from 'tokenx'
-import { v4 as uuidv4 } from 'uuid'
 
 import type { MigrationContext } from '../core/MigrationContext'
 import { BaseMigrator } from './BaseMigrator'
@@ -21,8 +33,6 @@ import { KNOWLEDGE_BASE_ID_REMAP_SHARED_DATA_KEY, KNOWLEDGE_ITEM_ID_REMAP_SHARED
 
 const logger = loggerService.withContext('KnowledgeVectorMigrator')
 
-const VECTORSTORE_TABLE_NAME = 'libsql_vectorstores_embedding'
-const INSERT_BATCH_SIZE = 100
 // Runtime vector store layout — source of truth:
 // src/main/features/knowledge/utils/storage/pathStorage.ts (CHERRY_META_DIR / VECTOR_STORE_FILE).
 // Runtime opens {knowledgeBaseDir}/{baseId}/.cherry/index.sqlite by the migrated (new) base id,
@@ -31,6 +41,9 @@ const KNOWLEDGE_META_DIR = '.cherry'
 const KNOWLEDGE_VECTOR_STORE_FILE = 'index.sqlite'
 const INDEXABLE_KNOWLEDGE_ITEM_TYPES = new Set<KnowledgeItemType>(['file', 'url', 'note'])
 const SKIP_WARNING_SAMPLE_LIMIT = 3
+// fs.rm options that survive a transient Windows lock (libsql handle / AV / indexer)
+// on the index.sqlite family; `recursive` is required for fs.rm to honor the retries.
+const REMOVE_RETRY_OPTIONS = { recursive: true, force: true, maxRetries: 5, retryDelay: 100 } as const
 
 function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => {
@@ -53,16 +66,6 @@ interface LegacyKnowledgeStateWithLoaders {
   bases?: LegacyKnowledgeBaseWithLoaders[]
 }
 
-interface PreparedVectorRow {
-  document: string
-  externalId: string
-  itemType: KnowledgeItemType
-  source: string
-  chunkIndex: number
-  tokenCount: number
-  embedding: number[]
-}
-
 interface MigratedKnowledgeItemForVector {
   id: string
   baseId: string
@@ -70,17 +73,29 @@ interface MigratedKnowledgeItemForVector {
   data: KnowledgeItemData
 }
 
-interface LoaderTarget {
-  id: string
-  itemType: KnowledgeItemType
-  source: string
+/** One legacy chunk pinned to a migrated item, in legacy read order. */
+interface MigratedChunk {
+  pageContent: string
+  embedding: number[]
+}
+
+/** A migrated item's material rebuild input plus the embedding hashes it introduces. */
+interface PreparedMaterial {
+  itemId: string
+  input: RebuildMaterialInput
 }
 
 interface PreparedBasePlan {
   baseId: string
   targetDbPath: string
   dimensions: number
-  rows: PreparedVectorRow[]
+  embeddingModelId: string
+  chunkerConfigHash: string
+  materials: PreparedMaterial[]
+  expectedUnitCount: number
+  // Distinct embedding hashes across the whole base (the embedding table is keyed
+  // by hash, so identical chunk bodies — within or across materials — collapse to one row).
+  expectedEmbeddingCount: number
   sourceRowCount: number
 }
 
@@ -88,10 +103,70 @@ function isStringMap(value: unknown): value is Map<string, string> {
   return value instanceof Map
 }
 
+/** Narrow a migrated row to the indexable subset the material-field helpers expect. */
+function toMaterialFieldSource(item: MigratedKnowledgeItemForVector): MaterialFieldSource | null {
+  if (item.type !== 'file' && item.type !== 'url' && item.type !== 'note') {
+    return null
+  }
+  // type/data correlation is guaranteed by the migration that wrote `data` per type;
+  // the source struct keeps them as independent fields, so assert the union here.
+  return { id: item.id, type: item.type, data: item.data } as MaterialFieldSource
+}
+
+/**
+ * Assemble one material rebuild input from a migrated item's preserved legacy
+ * chunks (Route A — keep the v1 split). The canonical content text is the chunk
+ * bodies joined by {@link DOCUMENT_SEPARATOR}; each unit's offsets span its body
+ * exactly, so the store's `content.text.slice(charStart, charEnd) === body`
+ * invariant holds by construction. Vectors are reused verbatim (no re-embedding)
+ * and deduped by embedding-text hash, matching the index store's hash-keyed
+ * embedding table.
+ */
+function buildMigratedRebuildInput(item: MaterialFieldSource, chunks: MigratedChunk[]): PreparedMaterial {
+  const parts: string[] = []
+  const units: RebuildMaterialInput['units'] = []
+  const embeddingByHash = new Map<string, number[]>()
+  let cursor = 0
+
+  chunks.forEach((chunk, index) => {
+    if (index > 0) {
+      cursor += DOCUMENT_SEPARATOR.length
+    }
+    const charStart = cursor
+    const charEnd = cursor + chunk.pageContent.length
+    cursor = charEnd
+    units.push({ unitType: 'chunk', unitIndex: index, charStart, charEnd })
+    parts.push(chunk.pageContent)
+
+    const embeddingTextHash = hashEmbeddingText(chunk.pageContent)
+    if (!embeddingByHash.has(embeddingTextHash)) {
+      embeddingByHash.set(embeddingTextHash, chunk.embedding)
+    }
+  })
+
+  const input: RebuildMaterialInput = {
+    material: {
+      relativePath: toMaterialRelativePath(item),
+      origin: toMaterialOrigin(item),
+      indexPolicy: 'index',
+      fileExt: toMaterialFileExt(item)
+    },
+    content: {
+      text: parts.join(DOCUMENT_SEPARATOR),
+      textFormat: toContentTextFormat(item),
+      normalizationVersion: NORMALIZATION_VERSION
+    },
+    units,
+    embeddings: [...embeddingByHash.entries()].map(([embeddingTextHash, vector]) => ({ embeddingTextHash, vector }))
+  }
+
+  return { itemId: item.id, input }
+}
+
 export class KnowledgeVectorMigrator extends BaseMigrator {
   readonly id = 'knowledge_vector'
   readonly name = 'KnowledgeVector'
-  readonly description = 'Rebuild legacy knowledge vectors into vectorstores libsql'
+  readonly description = 'Rebuild legacy knowledge vectors into the per-base index.sqlite store'
   readonly order = 3.5
 
   private sourceCount = 0
@@ -100,7 +175,6 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
   private skippedWarnings = new Map<string, { count: number; samples: string[] }>()
   private preparedBasePlans: PreparedBasePlan[] = []
   private successfulBaseIds = new Set<string>()
-  private targetCountByBaseId = new Map<string, number>()
   private executionErrors: string[] = []
 
   override reset(): void {
@@ -110,7 +184,6 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
     this.skippedWarnings = new Map<string, { count: number; samples: string[] }>()
     this.preparedBasePlans = []
     this.successfulBaseIds = new Set<string>()
-    this.targetCountByBaseId = new Map<string, number>()
     this.executionErrors = []
   }
 
@@ -145,139 +218,19 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
     this.skippedWarnings.clear()
   }
 
-  private async ensureVectorStoreSchema(client: Client, dimensions: number): Promise<void> {
-    await client.execute({
-      sql: `
-        CREATE TABLE IF NOT EXISTS ${VECTORSTORE_TABLE_NAME} (
-          id TEXT PRIMARY KEY,
-          external_id TEXT,
-          collection TEXT,
-          document TEXT,
-          metadata JSON DEFAULT '{}',
-          embeddings F32_BLOB(${dimensions})
-        )
-      `,
-      args: []
-    })
-
-    const indexStatements = [
-      `
-        CREATE INDEX IF NOT EXISTS idx_${VECTORSTORE_TABLE_NAME}_external_id
-        ON ${VECTORSTORE_TABLE_NAME} (external_id)
-      `,
-      `
-        CREATE INDEX IF NOT EXISTS idx_${VECTORSTORE_TABLE_NAME}_collection
-        ON ${VECTORSTORE_TABLE_NAME} (collection)
-      `
-    ]
-
-    for (const statement of indexStatements) {
-      await client.execute({ sql: statement, args: [] })
-    }
-
-    const ftsTableName = `${VECTORSTORE_TABLE_NAME}_fts`
-    await client.execute({
-      sql: `
-        CREATE VIRTUAL TABLE IF NOT EXISTS ${ftsTableName}
-        USING fts5(document, content='${VECTORSTORE_TABLE_NAME}', content_rowid='rowid')
-      `,
-      args: []
-    })
-
-    await client.execute({
-      sql: `
-        CREATE TRIGGER IF NOT EXISTS ${VECTORSTORE_TABLE_NAME}_ai
-        AFTER INSERT ON ${VECTORSTORE_TABLE_NAME}
-        BEGIN
-          INSERT INTO ${ftsTableName}(rowid, document)
-          VALUES (NEW.rowid, NEW.document);
-        END
-      `,
-      args: []
-    })
-
-    await client.execute({
-      sql: `
-        CREATE TRIGGER IF NOT EXISTS ${VECTORSTORE_TABLE_NAME}_au
-        AFTER UPDATE OF document ON ${VECTORSTORE_TABLE_NAME}
-        BEGIN
-          INSERT INTO ${ftsTableName}(${ftsTableName}, rowid, document)
-          VALUES ('delete', OLD.rowid, OLD.document);
-          INSERT INTO ${ftsTableName}(rowid, document)
-          VALUES (NEW.rowid, NEW.document);
-        END
-      `,
-      args: []
-    })
-
-    await client.execute({
-      sql: `
-        CREATE TRIGGER IF NOT EXISTS ${VECTORSTORE_TABLE_NAME}_ad
-        AFTER DELETE ON ${VECTORSTORE_TABLE_NAME}
-        BEGIN
-          INSERT INTO ${ftsTableName}(${ftsTableName}, rowid, document)
-          VALUES ('delete', OLD.rowid, OLD.document);
-        END
-      `,
-      args: []
-    })
-  }
-
-  private async insertVectorRows(
-    client: Client,
-    rows: Array<PreparedVectorRow & { id: string }>,
-    collection: string
-  ): Promise<void> {
-    if (rows.length === 0) {
-      return
-    }
-
-    const placeholders = rows
-      .map(
-        (_, index) =>
-          `(?${index * 6 + 1}, ?${index * 6 + 2}, ?${index * 6 + 3}, ?${index * 6 + 4}, ?${index * 6 + 5}, vector32(?${index * 6 + 6}))`
-      )
-      .join(', ')
-
-    const args = rows.flatMap((row) => [
-      row.id,
-      row.externalId,
-      collection,
-      row.document,
-      JSON.stringify({
-        itemId: row.externalId,
-        itemType: row.itemType,
-        source: row.source,
-        chunkIndex: row.chunkIndex,
-        tokenCount: row.tokenCount
-      }),
-      `[${row.embedding.join(',')}]`
-    ])
-
-    await client.execute({
-      sql: `
-        INSERT INTO ${VECTORSTORE_TABLE_NAME}
-          (id, external_id, collection, document, metadata, embeddings)
-        VALUES ${placeholders}
-      `,
-      args
-    })
-  }
-
-  private getMigratedItemSource(data: KnowledgeItemData): string {
-    if (!data || typeof data !== 'object' || !('source' in data) || typeof data.source !== 'string') {
-      return ''
-    }
-
-    return data.source.trim()
+  /** Remove an index.sqlite and its WAL sidecars, surviving a transient Windows lock. */
+  private async removeIndexStoreFiles(dbPath: string): Promise<void> {
+    await fs.promises.rm(dbPath, REMOVE_RETRY_OPTIONS)
+    await fs.promises.rm(`${dbPath}-wal`, REMOVE_RETRY_OPTIONS)
+    await fs.promises.rm(`${dbPath}-shm`, REMOVE_RETRY_OPTIONS)
   }
 
   private buildLoaderTargetMap(
     legacyBase: LegacyKnowledgeBaseWithLoaders | undefined,
     migratedItemsById: Map<string, MigratedKnowledgeItemForVector>,
     legacyItemIdRemap: Map<string, string>
-  ): Map<string, LoaderTarget> {
-    const map = new Map<string, LoaderTarget>()
+  ): Map<string, MigratedKnowledgeItemForVector> {
+    const map = new Map<string, MigratedKnowledgeItemForVector>()
     if (!legacyBase || !Array.isArray(legacyBase.items)) {
       return map
     }
@@ -297,23 +250,17 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
         continue
       }
 
-      const target: LoaderTarget = {
-        id: migratedItem.id,
-        itemType: migratedItem.type,
-        source: this.getMigratedItemSource(migratedItem.data)
-      }
-
       if (Array.isArray(item.uniqueIds) && item.uniqueIds.length > 0) {
         for (const uniqueId of item.uniqueIds) {
           if (typeof uniqueId === 'string' && uniqueId.trim() !== '') {
-            map.set(uniqueId, target)
+            map.set(uniqueId, migratedItem)
           }
         }
         continue
       }
 
       if (typeof item.uniqueId === 'string' && item.uniqueId.trim() !== '') {
-        map.set(item.uniqueId, target)
+        map.set(item.uniqueId, migratedItem)
       }
     }
 
@@ -368,6 +315,8 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
           continue
         }
 
+        // Capture before the awaits below: TS resets property narrowing across await.
+        const embeddingModelId = base.embeddingModelId
         const dimensions = base.dimensions
         if (typeof dimensions !== 'number' || !Number.isInteger(dimensions) || dimensions <= 0) {
           const warningMessage = `Skipped knowledge vector base ${base.id}: invalid dimensions`
@@ -421,8 +370,10 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
           migratedItemsByBaseId.get(base.id) ?? new Map<string, MigratedKnowledgeItemForVector>(),
           legacyItemIdRemap
         )
-        const rows: PreparedVectorRow[] = []
-        const chunkIndexByItemId = new Map<string, number>()
+
+        // Group the surviving chunks by migrated item, preserving legacy read order
+        // both across items (first appearance) and within an item (chunk order).
+        const chunksByItem = new Map<string, { item: MaterialFieldSource; chunks: MigratedChunk[] }>()
 
         for (const row of vectorRows) {
           // V2 only keeps vectors that can be proven to belong to an existing
@@ -436,9 +387,9 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
             continue
           }
 
-          if (!INDEXABLE_KNOWLEDGE_ITEM_TYPES.has(target.itemType)) {
+          if (!INDEXABLE_KNOWLEDGE_ITEM_TYPES.has(target.type)) {
             this.skippedCount += 1
-            const warningMessage = `Skipped knowledge vector row in base ${base.id}: container item '${target.id}' of type '${target.itemType}' is not indexable`
+            const warningMessage = `Skipped knowledge vector row in base ${base.id}: container item '${target.id}' of type '${target.type}' is not indexable`
             this.recordSkippedWarning('non_indexable_container', warningMessage)
             continue
           }
@@ -457,36 +408,52 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
             continue
           }
 
-          const sourceText = row.source.trim() || target.source
-          if (sourceText === '') {
+          // A vector whose length disagrees with the base's recorded dimensions
+          // would make the brute-force cosine scan compare mismatched lengths, so
+          // drop it rather than corrupt vector search for the whole base.
+          if (row.vector.value.length !== dimensions) {
             this.skippedCount += 1
-            const warningMessage = `Skipped knowledge vector row in base ${base.id}: source missing for item '${target.id}'`
-            this.recordSkippedWarning('missing_source', warningMessage)
+            const warningMessage = `Skipped knowledge vector row in base ${base.id}: vector length ${row.vector.value.length} != base dimensions ${dimensions} for uniqueLoaderId '${row.uniqueLoaderId}'`
+            this.recordSkippedWarning('dimension_mismatch', warningMessage)
             continue
           }
 
-          const chunkIndex = chunkIndexByItemId.get(target.id) ?? 0
-          chunkIndexByItemId.set(target.id, chunkIndex + 1)
+          const materialItem = toMaterialFieldSource(target)
+          if (!materialItem) {
+            // INDEXABLE_KNOWLEDGE_ITEM_TYPES already excluded container types; this is
+            // unreachable, but keep it explicit so a future type addition fails closed.
+            continue
+          }
 
-          rows.push({
-            document: row.pageContent,
-            externalId: target.id,
-            itemType: target.itemType,
-            source: sourceText,
-            chunkIndex,
-            tokenCount: estimateTokenCount(row.pageContent),
-            embedding: row.vector.value
-          })
+          const entry = chunksByItem.get(target.id) ?? { item: materialItem, chunks: [] }
+          entry.chunks.push({ pageContent: row.pageContent, embedding: row.vector.value })
+          chunksByItem.set(target.id, entry)
         }
 
-        // A base is still planned even when rows.length === 0. In that case the
-        // rebuilt V2 vector store is intentionally empty because none of the
-        // legacy vectors can be associated with valid migrated knowledge_item rows.
+        const materials: PreparedMaterial[] = []
+        const baseEmbeddingHashes = new Set<string>()
+        let expectedUnitCount = 0
+        for (const { item, chunks } of chunksByItem.values()) {
+          const material = buildMigratedRebuildInput(item, chunks)
+          materials.push(material)
+          expectedUnitCount += material.input.units.length
+          for (const embedding of material.input.embeddings) {
+            baseEmbeddingHashes.add(embedding.embeddingTextHash)
+          }
+        }
+
+        // A base is still planned even when it has no materials. In that case the
+        // rebuilt V2 store is intentionally empty because none of the legacy vectors
+        // could be associated with valid, indexable migrated knowledge_item rows.
         this.preparedBasePlans.push({
           baseId: base.id,
           targetDbPath: this.getRuntimeVectorStorePath(ctx.paths.knowledgeBaseDir, base.id),
           dimensions,
-          rows,
+          embeddingModelId,
+          chunkerConfigHash: hashChunkerConfig(base.chunkSize, base.chunkOverlap),
+          materials,
+          expectedUnitCount,
+          expectedEmbeddingCount: baseEmbeddingHashes.size,
           sourceRowCount: vectorRows.length
         })
       }
@@ -518,7 +485,7 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
       }
     }
 
-    const totalWork = this.preparedBasePlans.reduce((sum, plan) => sum + Math.max(plan.rows.length, 1), 0)
+    const totalWork = this.preparedBasePlans.reduce((sum, plan) => sum + Math.max(plan.materials.length, 1), 0)
     let processedWork = 0
     let processedCount = 0
 
@@ -526,70 +493,70 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
       const tempPath = this.getTempVectorStorePath(plan.targetDbPath)
 
       try {
-        const rebuiltRows: Array<PreparedVectorRow & { id: string }> = plan.rows.map((row) => ({
-          ...row,
-          id: uuidv4()
-        }))
-
         await fs.promises.mkdir(path.dirname(plan.targetDbPath), { recursive: true })
-        await fs.promises.rm(tempPath, { force: true })
+        await this.removeIndexStoreFiles(tempPath)
 
-        const targetClient = createClient({ url: pathToFileURL(tempPath).toString() })
+        // Rebuild into a temp store through the exact runtime open sequence
+        // (driver → schema → index_meta → KnowledgeIndexStore.rebuildMaterial), so the
+        // migrated store is byte-for-byte a store the runtime would produce.
+        const driver = await openLibsqlIndexDriver(tempPath)
         try {
-          await this.ensureVectorStoreSchema(targetClient, plan.dimensions)
+          await createKnowledgeIndexSchema(driver)
+          await ensureIndexMeta(driver, {
+            baseId: plan.baseId,
+            embeddingModelId: plan.embeddingModelId,
+            dimensions: plan.dimensions,
+            chunkerConfigHash: plan.chunkerConfigHash
+          })
+          const store = new KnowledgeIndexStore(driver, libsqlVectorIndex)
 
-          for (let i = 0; i < rebuiltRows.length; i += INSERT_BATCH_SIZE) {
-            const batch = rebuiltRows.slice(i, i + INSERT_BATCH_SIZE)
-            await this.insertVectorRows(targetClient, batch, plan.baseId)
-            processedWork += batch.length
-            this.reportProgress(
-              Math.round((processedWork / totalWork) * 100),
-              `Migrated ${processedWork}/${totalWork} knowledge vector work units`,
-              {
-                key: 'migration.progress.migrated_knowledge_vectors',
-                params: { processed: processedWork, total: totalWork }
-              }
-            )
+          for (const material of plan.materials) {
+            await store.rebuildMaterial(material.itemId, material.input)
+            processedWork += 1
+            this.reportRebuildProgress(processedWork, totalWork)
             await yieldToEventLoop()
           }
+
+          // Fold the WAL back into the main db file: only the main file is renamed
+          // onto the target, and libsql does not reliably checkpoint on close — without
+          // this the renamed store reads short (SQLITE_IOERR_SHORT_READ) because its
+          // committed pages still live in the now-orphaned `${tempPath}-wal` sidecar.
+          await driver.execute('PRAGMA wal_checkpoint(TRUNCATE)')
         } finally {
-          targetClient.close()
+          // Close before the rename so the file handle is released (a leaked handle
+          // would block the rename and the later base-dir deletion on Windows).
+          await driver.close()
         }
 
-        if (rebuiltRows.length === 0) {
+        if (plan.materials.length === 0) {
           processedWork += 1
-          this.reportProgress(
-            Math.round((processedWork / totalWork) * 100),
-            `Migrated ${processedWork}/${totalWork} knowledge vector work units`,
-            {
-              key: 'migration.progress.migrated_knowledge_vectors',
-              params: { processed: processedWork, total: totalWork }
-            }
-          )
+          this.reportRebuildProgress(processedWork, totalWork)
           await yieldToEventLoop()
         }
 
         // Leave the v1 legacy embedjs DB untouched in place: a user who rolls back to v1 after a
         // failed or abandoned migration must keep a working knowledge base. The rebuilt V2 store
         // lives under the migrated base's new uuid directory, so it never collides with the legacy
-        // flat path and the v1 source needs no relocation.
-        //
-        // Runtime may have auto-created an empty store at the target; remove it first so the rename
-        // succeeds on Windows (POSIX rename overwrites, Windows throws on an existing target). That
-        // target can be transiently locked on Windows (libsql handle, AV, file indexer), so retry
-        // the unlink on EBUSY — `recursive` is required for fs.rm to honor maxRetries/retryDelay.
-        await fs.promises.rm(plan.targetDbPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+        // flat path and the v1 source needs no relocation. Runtime may have auto-created an empty
+        // store at the target; remove it (and its WAL sidecars) first so the rename succeeds on
+        // Windows (POSIX rename overwrites, Windows throws on an existing target).
+        await this.removeIndexStoreFiles(plan.targetDbPath)
         await fs.promises.rename(tempPath, plan.targetDbPath)
 
         this.successfulBaseIds.add(plan.baseId)
-        this.targetCountByBaseId.set(plan.baseId, rebuiltRows.length)
-        processedCount += rebuiltRows.length
+        processedCount += plan.expectedUnitCount
+        logger.info('Migrated knowledge vector base as preserved-chunk concatenation', {
+          baseId: plan.baseId,
+          materials: plan.materials.length,
+          units: plan.expectedUnitCount,
+          embeddings: plan.expectedEmbeddingCount
+        })
       } catch (error) {
         const errorMessage = `Knowledge vector base ${plan.baseId} execution failed: ${error instanceof Error ? error.message : String(error)}`
         logger.error(errorMessage, error instanceof Error ? error : new Error(String(error)))
         this.executionErrors.push(errorMessage)
 
-        await fs.promises.rm(tempPath, { force: true })
+        await this.removeIndexStoreFiles(tempPath)
 
         return {
           success: false,
@@ -612,6 +579,17 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
     }
   }
 
+  private reportRebuildProgress(processedWork: number, totalWork: number): void {
+    this.reportProgress(
+      Math.round((processedWork / totalWork) * 100),
+      `Migrated ${processedWork}/${totalWork} knowledge vector work units`,
+      {
+        key: 'migration.progress.migrated_knowledge_vectors',
+        params: { processed: processedWork, total: totalWork }
+      }
+    )
+  }
+
   async validate(): Promise<ValidateResult> {
     const errors: ValidationError[] = []
     let targetCount = 0
@@ -624,82 +602,31 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
 
         const client = createClient({ url: pathToFileURL(plan.targetDbPath).toString() })
         try {
-          const expectedCount = this.targetCountByBaseId.get(plan.baseId) ?? 0
-          const countResult = await client.execute({
-            sql: `SELECT count(*) AS count FROM ${VECTORSTORE_TABLE_NAME}`,
+          const materialCount = await this.tableCount(client, 'material')
+          const unitCount = await this.tableCount(client, 'search_unit')
+          const embeddingCount = await this.tableCount(client, 'embedding')
+          targetCount += unitCount
+
+          this.pushCountMismatch(errors, plan.baseId, 'material', plan.materials.length, materialCount)
+          this.pushCountMismatch(errors, plan.baseId, 'search_unit', plan.expectedUnitCount, unitCount)
+          this.pushCountMismatch(errors, plan.baseId, 'embedding', plan.expectedEmbeddingCount, embeddingCount)
+
+          // Every unit's body search_text must resolve to a stored embedding, or that
+          // unit is silently absent from vector search. This is the migration-time
+          // form of the rebuild self-heal invariant (knowledge-technical-design.md §10).
+          const uncovered = await client.execute({
+            sql: `SELECT count(*) AS count FROM search_text st
+                  LEFT JOIN embedding e ON e.embedding_text_hash = st.embedding_text_hash
+                  WHERE e.embedding_text_hash IS NULL`,
             args: []
           })
-          const actualCount = Number(countResult.rows[0]?.count ?? 0)
-          targetCount += actualCount
-
-          if (actualCount !== expectedCount) {
+          const uncoveredCount = Number(uncovered.rows[0]?.count ?? 0)
+          if (uncoveredCount > 0) {
             errors.push({
-              key: `knowledge_vector_count_mismatch_${plan.baseId}`,
-              expected: expectedCount,
-              actual: actualCount,
-              message: `Knowledge vector count mismatch for base ${plan.baseId}: expected ${expectedCount}, got ${actualCount}`
-            })
-          }
-
-          const missingExternalIdResult = await client.execute({
-            sql: `SELECT count(*) AS count FROM ${VECTORSTORE_TABLE_NAME} WHERE external_id IS NULL OR external_id = ''`,
-            args: []
-          })
-          const missingExternalIdCount = Number(missingExternalIdResult.rows[0]?.count ?? 0)
-          if (missingExternalIdCount > 0) {
-            errors.push({
-              key: `knowledge_vector_missing_external_id_${plan.baseId}`,
+              key: `knowledge_vector_uncovered_units_${plan.baseId}`,
               expected: 0,
-              actual: missingExternalIdCount,
-              message: `Found ${missingExternalIdCount} knowledge vector rows without external_id in base ${plan.baseId}`
-            })
-          }
-
-          const metadataResult = await client.execute({
-            sql: `SELECT id, external_id, metadata FROM ${VECTORSTORE_TABLE_NAME}`,
-            args: []
-          })
-
-          let invalidMetadataCount = 0
-          let mismatchedItemIdCount = 0
-
-          for (const row of metadataResult.rows) {
-            let metadata: unknown
-
-            try {
-              metadata = JSON.parse(String(row.metadata ?? '{}'))
-            } catch {
-              invalidMetadataCount += 1
-              continue
-            }
-
-            const parsedMetadata = KnowledgeChunkMetadataSchema.safeParse(metadata)
-            if (!parsedMetadata.success) {
-              invalidMetadataCount += 1
-              continue
-            }
-
-            const externalId = typeof row.external_id === 'string' ? row.external_id : String(row.external_id ?? '')
-            if (parsedMetadata.data.itemId !== externalId) {
-              mismatchedItemIdCount += 1
-            }
-          }
-
-          if (invalidMetadataCount > 0) {
-            errors.push({
-              key: `knowledge_vector_invalid_metadata_${plan.baseId}`,
-              expected: 0,
-              actual: invalidMetadataCount,
-              message: `Found ${invalidMetadataCount} knowledge vector rows with invalid runtime metadata in base ${plan.baseId}`
-            })
-          }
-
-          if (mismatchedItemIdCount > 0) {
-            errors.push({
-              key: `knowledge_vector_mismatched_item_id_${plan.baseId}`,
-              expected: 0,
-              actual: mismatchedItemIdCount,
-              message: `Found ${mismatchedItemIdCount} knowledge vector rows whose metadata.itemId does not match external_id in base ${plan.baseId}`
+              actual: uncoveredCount,
+              message: `Found ${uncoveredCount} knowledge search_text rows without a stored embedding in base ${plan.baseId}`
             })
           }
         } finally {
@@ -740,5 +667,28 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
         }
       }
     }
+  }
+
+  private async tableCount(client: ReturnType<typeof createClient>, table: string): Promise<number> {
+    const result = await client.execute({ sql: `SELECT count(*) AS count FROM ${table}`, args: [] })
+    return Number(result.rows[0]?.count ?? 0)
+  }
+
+  private pushCountMismatch(
+    errors: ValidationError[],
+    baseId: string,
+    table: string,
+    expected: number,
+    actual: number
+  ): void {
+    if (actual === expected) {
+      return
+    }
+    errors.push({
+      key: `knowledge_vector_${table}_count_mismatch_${baseId}`,
+      expected,
+      actual,
+      message: `Knowledge vector ${table} count mismatch for base ${baseId}: expected ${expected}, got ${actual}`
+    })
   }
 }

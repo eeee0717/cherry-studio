@@ -184,7 +184,7 @@ describe('KnowledgeIndexStore', () => {
     expect(await count('search_unit')).toBe(2)
   })
 
-  it('deletes a material and its derived rows, leaving embeddings for GC', async () => {
+  it('deletes a material and its derived rows, sweeping the now-orphaned embedding and content', async () => {
     await store.rebuildMaterial('m1', buildInput('the knowledge base', [[0, 18]]))
     expect(await ftsMatchCount('knowledge')).toBe(1)
 
@@ -195,8 +195,9 @@ describe('KnowledgeIndexStore', () => {
     expect(await count('search_unit')).toBe(0)
     expect(await count('search_text')).toBe(0)
     expect(await ftsMatchCount('knowledge')).toBe(0)
-    // Orphaned embedding is intentionally left for a later GC pass (§10).
-    expect(await count('embedding')).toBe(1)
+    // GC sweeps the embedding and content rows nothing references any more.
+    expect(await count('embedding')).toBe(0)
+    expect(await count('content')).toBe(0)
   })
 
   it('shares one content row across materials with identical content', async () => {
@@ -216,10 +217,10 @@ describe('KnowledgeIndexStore', () => {
 
     await store.deleteMaterial('m1')
 
-    // The shared embedding must survive (m2 still references it) and m2 must stay
-    // reachable by vector search. A future inline GC that dropped a still-referenced
-    // embedding when m1 was deleted (§16) would fail this behavioral assertion —
-    // the bare row count in the GC test above cannot catch that.
+    // GC must keep the shared embedding (m2 still references it via its search_text)
+    // and m2 must stay reachable by vector search. A GC that dropped a still-referenced
+    // embedding when m1 was deleted would fail this behavioral assertion — the bare row
+    // count in the delete test above cannot catch that.
     expect(await count('embedding')).toBe(1)
     const matches = await store.search({ queryText: '', queryEmbedding: [0.1, 0.2, 0.3], mode: 'vector', topK: 10 })
     expect(matches.map((m) => m.materialId)).toEqual(['m2'])
@@ -236,12 +237,47 @@ describe('KnowledgeIndexStore', () => {
     await store.rebuildMaterial('m1', buildInput('rebuilt unrelated body', [[0, 22]], 'a.md', [0.9, 0.8, 0.7]))
 
     // The shared embedding must survive (m2 still references it), alongside m1's new
-    // one → 2 rows. A future inline GC that dropped the now-singly-referenced shared
-    // embedding on rebuild (§16) would unjoin m2 from vector search below — the bare
-    // row count cannot catch that, but searching the shared vector can.
+    // one → 2 rows. GC dropping the now-singly-referenced shared embedding on rebuild
+    // would unjoin m2 from vector search below — the bare row count cannot catch that,
+    // but searching the shared vector can.
     expect(await count('embedding')).toBe(2)
     const matches = await store.search({ queryText: '', queryEmbedding: [0.1, 0.2, 0.3], mode: 'vector', topK: 10 })
     expect(matches.map((m) => m.materialId)).toContain('m2')
+  })
+
+  it('sweeps the orphaned embedding and content when a material is rebuilt with new content', async () => {
+    await store.rebuildMaterial('m1', buildInput('original body', [[0, 13]], 'a.md', [0.1, 0.2, 0.3]))
+    expect(await count('embedding')).toBe(1)
+    expect(await count('content')).toBe(1)
+
+    // Rebuild with unrelated content + a distinct vector; nothing else references the
+    // old embedding or old content, so GC must remove both, leaving only the new ones.
+    await store.rebuildMaterial('m1', buildInput('replacement body', [[0, 16]], 'a.md', [0.9, 0.8, 0.7]))
+
+    expect(await count('embedding')).toBe(1)
+    expect(await count('content')).toBe(1)
+    const units = await store.listMaterialUnits('m1')
+    expect(units.map((u) => u.text)).toEqual(['replacement body'])
+  })
+
+  it('rolls back the rebuild when a new unit body has no backing embedding (self-heal guard)', async () => {
+    // Seed a good index so we can prove it survives the rejected rebuild.
+    await store.rebuildMaterial('m1', buildInput('safe original', [[0, 13]], 'a.md'))
+
+    // Simulate the listExistingEmbeddingHashes race: a unit whose hash is neither
+    // supplied nor already stored (a concurrent GC dropped it). The guard must reject.
+    const racey: RebuildMaterialInput = {
+      material: { relativePath: 'a.md', origin: 'user', indexPolicy: 'index' },
+      content: { text: 'body with no vector', textFormat: 'markdown', normalizationVersion: 1 },
+      units: [{ unitType: 'chunk', unitIndex: 0, charStart: 0, charEnd: 19 }],
+      embeddings: []
+    }
+    await expect(store.rebuildMaterial('m1', racey)).rejects.toThrow('missing the embedding')
+
+    // The prior index is intact (rolled back), and no orphan/partial rows leaked.
+    const units = await store.listMaterialUnits('m1')
+    expect(units.map((u) => u.text)).toEqual(['safe original'])
+    expect(await count('embedding')).toBe(1)
   })
 
   it('listExistingEmbeddingHashes reports only the hashes already stored', async () => {

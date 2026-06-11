@@ -29,15 +29,16 @@ vi.mock('@vectorstores/readers/text', async () => {
 vi.mock('@vectorstores/readers/csv', () => ({ CSVReader: class MockCSVReader {} }))
 vi.mock('@vectorstores/readers/docx', () => ({ DocxReader: class MockDocxReader {} }))
 vi.mock('@vectorstores/readers/json', () => ({ JSONReader: class MockJSONReader {} }))
-vi.mock('@vectorstores/readers/markdown', () => ({ MarkdownReader: class MockMarkdownReader {} }))
+// URL snapshots are .md, so the markdown reader shares the same loadData mock.
+vi.mock('@vectorstores/readers/markdown', () => ({
+  MarkdownReader: class MockMarkdownReader {
+    loadData = loadDataMock
+  }
+}))
 vi.mock('@vectorstores/readers/pdf', () => ({ PDFReader: class MockPDFReader {} }))
 
 vi.mock('../files/DraftsExportReader', () => ({ DraftsExportReader: class MockDraftsExportReader {} }))
 vi.mock('../files/EpubReader', () => ({ EpubReader: class MockEpubReader {} }))
-
-vi.mock('../../utils/sources/url', () => ({
-  fetchKnowledgeWebPage: vi.fn().mockResolvedValue('url content')
-}))
 
 const { loadFileDocuments } = await import('../KnowledgeFileReader')
 const { loadNoteDocuments } = await import('../KnowledgeNoteReader')
@@ -70,19 +71,20 @@ describe('knowledge reader metadata', () => {
     })
   })
 
-  it('normalizes url source metadata', async () => {
+  it('normalizes url source metadata from its captured snapshot', async () => {
     const documents = await loadUrlDocuments({
       id: 'url-item-1',
       baseId: 'kb-1',
       groupId: null,
       type: 'url',
-      data: { source: 'https://example.com', url: 'https://example.com' },
+      data: { source: 'https://example.com', url: 'https://example.com', relativePath: 'example.md' },
       status: 'idle',
       error: null,
       createdAt: '2026-04-08T00:00:00.000Z',
       updatedAt: '2026-04-08T00:00:00.000Z'
     })
 
+    expect(loadDataMock).toHaveBeenCalledWith('/mock/feature.knowledgebase.data/kb-1/example.md')
     expect(documents[0]?.metadata).toEqual({
       source: 'https://example.com'
     })

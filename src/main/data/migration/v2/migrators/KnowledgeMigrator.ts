@@ -9,6 +9,7 @@ import { knowledgeBaseTable, knowledgeItemTable } from '@data/db/schemas/knowled
 import { userModelTable } from '@data/db/schemas/userModel'
 import { createClient, type Value as LibsqlValue } from '@libsql/client'
 import { loggerService } from '@logger'
+import { dedupeKnowledgeRelativePath } from '@main/features/knowledge/utils/storage/pathStorage'
 import { sanitizeFilename } from '@main/utils/file'
 import { copy, ensureDir } from '@main/utils/file/fs'
 import type { ExecuteResult, PrepareResult, ValidateResult, ValidationError } from '@shared/data/migration/v2/types'
@@ -110,23 +111,6 @@ const resolveLegacyKnowledgeBaseDimensions = (base: LegacyKnowledgeBaseWithIdent
   return typeof base.dimensions === 'number' && Number.isInteger(base.dimensions) && base.dimensions > 0
     ? base.dimensions
     : null
-}
-
-/** Make `name` unique within `used`, inserting a numeric suffix before the extension on collision. */
-function dedupeKnowledgeRelativePath(name: string, used: Set<string>): string {
-  let candidate = name
-  if (used.has(candidate)) {
-    const ext = path.extname(name)
-    const stem = name.slice(0, name.length - ext.length)
-    let suffix = 1
-    candidate = `${stem}-${suffix}${ext}`
-    while (used.has(candidate)) {
-      suffix += 1
-      candidate = `${stem}-${suffix}${ext}`
-    }
-  }
-  used.add(candidate)
-  return candidate
 }
 
 export class KnowledgeMigrator extends BaseMigrator {

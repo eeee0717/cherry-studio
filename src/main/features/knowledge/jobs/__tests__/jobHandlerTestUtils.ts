@@ -20,9 +20,13 @@ const mocks = vi.hoisted(() => ({
   knowledgeItemSetSubtreeStatusMock: vi.fn(),
   knowledgeItemUpdateStatusMock: vi.fn(),
   knowledgeItemUpdateIndexedRelativePathMock: vi.fn(),
+  knowledgeItemGetItemsByBaseIdMock: vi.fn(),
+  knowledgeItemUpdateUrlSnapshotRelativePathMock: vi.fn(),
   listMock: vi.fn(),
   loadKnowledgeItemDocumentsMock: vi.fn(),
   prepareKnowledgeItemMock: vi.fn(),
+  fetchKnowledgeWebPageMock: vi.fn(),
+  captureUrlSnapshotFileMock: vi.fn(),
   rebuildMaterialMock: vi.fn(),
   deleteMaterialMock: vi.fn(),
   listExistingEmbeddingHashesMock: vi.fn(),
@@ -45,9 +49,13 @@ export const {
   knowledgeItemSetSubtreeStatusMock,
   knowledgeItemUpdateStatusMock,
   knowledgeItemUpdateIndexedRelativePathMock,
+  knowledgeItemGetItemsByBaseIdMock,
+  knowledgeItemUpdateUrlSnapshotRelativePathMock,
   listMock,
   loadKnowledgeItemDocumentsMock,
   prepareKnowledgeItemMock,
+  fetchKnowledgeWebPageMock,
+  captureUrlSnapshotFileMock,
   rebuildMaterialMock,
   deleteMaterialMock,
   listExistingEmbeddingHashesMock,
@@ -106,9 +114,11 @@ vi.mock('@data/services/KnowledgeItemService', () => ({
   knowledgeItemService: {
     getById: knowledgeItemGetByIdMock,
     getSubtreeItems: knowledgeItemGetSubtreeItemsMock,
+    getItemsByBaseId: knowledgeItemGetItemsByBaseIdMock,
     deleteItemsByIds: deleteItemsByIdsMock,
     setSubtreeStatus: knowledgeItemSetSubtreeStatusMock,
     updateIndexedRelativePath: knowledgeItemUpdateIndexedRelativePathMock,
+    updateUrlSnapshotRelativePath: knowledgeItemUpdateUrlSnapshotRelativePathMock,
     updateStatus: knowledgeItemUpdateStatusMock
   }
 }))
@@ -119,6 +129,14 @@ vi.mock('../../readers/KnowledgeReader', () => ({
 
 vi.mock('../../utils/sources/prepare', () => ({
   prepareKnowledgeItem: prepareKnowledgeItemMock
+}))
+
+vi.mock('../../utils/sources/url', () => ({
+  fetchKnowledgeWebPage: fetchKnowledgeWebPageMock
+}))
+
+vi.mock('../../utils/sources/urlSnapshot', () => ({
+  captureUrlSnapshotFile: captureUrlSnapshotFileMock
 }))
 
 vi.mock('../../utils/storage/pathStorage', async () => {
@@ -180,6 +198,24 @@ export function createNoteItem(
     groupId,
     type: 'note',
     data: { source: id, content: `hello ${id}` },
+    status,
+    error: null,
+    createdAt: '2026-04-08T00:00:00.000Z',
+    updatedAt: '2026-04-08T00:00:00.000Z'
+  }
+}
+
+export function createUrlItem(
+  id = 'url-1',
+  relativePath?: string,
+  status: Exclude<KnowledgeItemOf<'url'>['status'], 'failed'> = 'processing'
+): KnowledgeItemOf<'url'> {
+  return {
+    id,
+    baseId: 'kb-1',
+    groupId: null,
+    type: 'url',
+    data: { source: 'https://example.com', url: 'https://example.com', ...(relativePath ? { relativePath } : {}) },
     status,
     error: null,
     createdAt: '2026-04-08T00:00:00.000Z',
@@ -292,8 +328,14 @@ beforeEach(() => {
   knowledgeBaseGetByIdMock.mockResolvedValue(createBase())
   knowledgeItemGetByIdMock.mockResolvedValue(createNoteItem())
   knowledgeItemGetSubtreeItemsMock.mockResolvedValue([])
+  knowledgeItemGetItemsByBaseIdMock.mockResolvedValue([])
   knowledgeItemSetSubtreeStatusMock.mockResolvedValue([])
   knowledgeItemUpdateStatusMock.mockResolvedValue(createNoteItem())
+  fetchKnowledgeWebPageMock.mockResolvedValue('# Example page\n\nbody text')
+  captureUrlSnapshotFileMock.mockResolvedValue('example-page.md')
+  knowledgeItemUpdateUrlSnapshotRelativePathMock.mockImplementation(async (id: string, relativePath: string) =>
+    createUrlItem(id, relativePath)
+  )
   loadKnowledgeItemDocumentsMock.mockResolvedValue([
     {
       text: 'hello world',
