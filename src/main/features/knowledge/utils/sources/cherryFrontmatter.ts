@@ -10,6 +10,9 @@
  * drift between the two would make every snapshot hash as "modified".
  */
 
+/** `origin` value for snapshots reconstructed from migrated v1 chunks. */
+export const CHERRY_SNAPSHOT_ORIGIN_V1_MIGRATION = 'v1-migration'
+
 export interface CherryUrlSnapshotFrontmatter {
   /** The captured page URL. */
   source: string

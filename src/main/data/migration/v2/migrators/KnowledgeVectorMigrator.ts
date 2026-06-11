@@ -13,6 +13,15 @@ import {
   toMaterialOrigin,
   toMaterialRelativePath
 } from '@main/features/knowledge/utils/indexing/materialFields'
+import {
+  CHERRY_SNAPSHOT_ORIGIN_V1_MIGRATION,
+  serializeCherryUrlSnapshotFrontmatter
+} from '@main/features/knowledge/utils/sources/cherryFrontmatter'
+import { deriveUrlSnapshotSlug } from '@main/features/knowledge/utils/sources/urlSnapshot'
+import {
+  collectKnowledgeReservedRelativePaths,
+  dedupeKnowledgeRelativePath
+} from '@main/features/knowledge/utils/storage/pathStorage'
 import { hashChunkerConfig, hashEmbeddingText } from '@main/features/knowledge/vectorstore/indexStore/hashing'
 import { ensureIndexMeta, NORMALIZATION_VERSION } from '@main/features/knowledge/vectorstore/indexStore/indexMeta'
 import { KnowledgeIndexStore } from '@main/features/knowledge/vectorstore/indexStore/KnowledgeIndexStore'
@@ -26,6 +35,7 @@ import {
   type KnowledgeItemData,
   type KnowledgeItemType
 } from '@shared/data/types/knowledge'
+import { eq } from 'drizzle-orm'
 
 import type { MigrationContext } from '../core/MigrationContext'
 import { BaseMigrator } from './BaseMigrator'
@@ -85,13 +95,30 @@ interface PreparedMaterial {
   input: RebuildMaterialInput
 }
 
+/**
+ * A url snapshot file to materialize next to the rebuilt store, so migrated
+ * urls are real base files from day one (knowledge_item exit path,
+ * knowledge-technical-design.md §7) — reindex then reads them offline instead
+ * of re-fetching, and the material row drops the virtual item-id path.
+ */
+interface PlannedUrlSnapshot {
+  itemId: string
+  relativePath: string
+  /** cherry frontmatter (origin: v1-migration) + the material's content text. */
+  fileText: string
+  /** The item's data with `relativePath` pinned, written back to the migrated row. */
+  data: KnowledgeItemData
+}
+
 interface PreparedBasePlan {
   baseId: string
+  baseDirPath: string
   targetDbPath: string
   dimensions: number
   embeddingModelId: string
   chunkerConfigHash: string
   materials: PreparedMaterial[]
+  urlSnapshots: PlannedUrlSnapshot[]
   expectedUnitCount: number
   // Distinct embedding hashes across the whole base (the embedding table is keyed
   // by hash, so identical chunk bodies — within or across materials — collapse to one row).
@@ -269,6 +296,9 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
 
   async prepare(ctx: MigrationContext): Promise<PrepareResult> {
     try {
+      // One timestamp for every snapshot this run materializes; it records when
+      // the file was written (the migration), not a page fetch — origin says so.
+      const capturedAt = new Date().toISOString()
       const knowledgeState = ctx.sources.reduxState.getCategory<LegacyKnowledgeStateWithLoaders>('knowledge')
       const migratedBases = await ctx.db.select().from(knowledgeBaseTable)
 
@@ -430,11 +460,41 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
           chunksByItem.set(target.id, entry)
         }
 
+        // Snapshot names must dodge every path the base already occupies (copied
+        // files, their processed artifacts, other snapshots planned this run).
+        const reservedPaths = collectKnowledgeReservedRelativePaths([
+          ...(migratedItemsByBaseId.get(base.id)?.values() ?? [])
+        ])
+
         const materials: PreparedMaterial[] = []
+        const urlSnapshots: PlannedUrlSnapshot[] = []
         const baseEmbeddingHashes = new Set<string>()
         let expectedUnitCount = 0
         for (const { item, chunks } of chunksByItem.values()) {
           const material = buildMigratedRebuildInput(item, chunks)
+          if (item.type === 'url') {
+            // A re-run after a partial migration may find the row already pinned
+            // to a snapshot path (and that path already reserved above); reuse it
+            // instead of deduping into a useless `name-1.md` twin.
+            const relativePath =
+              item.data.relativePath ??
+              dedupeKnowledgeRelativePath(
+                `${deriveUrlSnapshotSlug(material.input.content.text, item.data.url)}.md`,
+                reservedPaths
+              )
+            material.input.material.relativePath = relativePath
+            urlSnapshots.push({
+              itemId: item.id,
+              relativePath,
+              fileText:
+                serializeCherryUrlSnapshotFrontmatter({
+                  source: item.data.url,
+                  capturedAt,
+                  origin: CHERRY_SNAPSHOT_ORIGIN_V1_MIGRATION
+                }) + material.input.content.text,
+              data: { ...item.data, relativePath }
+            })
+          }
           materials.push(material)
           expectedUnitCount += material.input.units.length
           for (const embedding of material.input.embeddings) {
@@ -447,11 +507,13 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
         // could be associated with valid, indexable migrated knowledge_item rows.
         this.preparedBasePlans.push({
           baseId: base.id,
+          baseDirPath: path.join(ctx.paths.knowledgeBaseDir, base.id),
           targetDbPath: this.getRuntimeVectorStorePath(ctx.paths.knowledgeBaseDir, base.id),
           dimensions,
           embeddingModelId,
           chunkerConfigHash: hashChunkerConfig(base.chunkSize, base.chunkOverlap),
           materials,
+          urlSnapshots,
           expectedUnitCount,
           expectedEmbeddingCount: baseEmbeddingHashes.size,
           sourceRowCount: vectorRows.length
@@ -477,7 +539,7 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
     }
   }
 
-  async execute(): Promise<ExecuteResult> {
+  async execute(ctx: MigrationContext): Promise<ExecuteResult> {
     if (this.preparedBasePlans.length === 0) {
       return {
         success: true,
@@ -543,11 +605,23 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
         await this.removeIndexStoreFiles(plan.targetDbPath)
         await fs.promises.rename(tempPath, plan.targetDbPath)
 
+        // Materialize each migrated url's snapshot file (overwriting a previous
+        // partial run's copy) and pin the item row to it, so the runtime's
+        // ensure-snapshot step reads it offline instead of re-fetching the page.
+        for (const snapshot of plan.urlSnapshots) {
+          await fs.promises.writeFile(path.join(plan.baseDirPath, snapshot.relativePath), snapshot.fileText, 'utf-8')
+          await ctx.db
+            .update(knowledgeItemTable)
+            .set({ data: snapshot.data })
+            .where(eq(knowledgeItemTable.id, snapshot.itemId))
+        }
+
         this.successfulBaseIds.add(plan.baseId)
         processedCount += plan.expectedUnitCount
         logger.info('Migrated knowledge vector base as preserved-chunk concatenation', {
           baseId: plan.baseId,
           materials: plan.materials.length,
+          urlSnapshots: plan.urlSnapshots.length,
           units: plan.expectedUnitCount,
           embeddings: plan.expectedEmbeddingCount
         })
@@ -598,6 +672,23 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
       for (const plan of this.preparedBasePlans) {
         if (!this.successfulBaseIds.has(plan.baseId)) {
           continue
+        }
+
+        // The rebuilt store's url material rows reference these snapshot paths,
+        // so a missing file would surface later as an unreadable material.
+        const missingSnapshots = plan.urlSnapshots.filter(
+          (snapshot) => !fs.existsSync(path.join(plan.baseDirPath, snapshot.relativePath))
+        )
+        if (missingSnapshots.length > 0) {
+          errors.push({
+            key: `knowledge_vector_url_snapshots_${plan.baseId}`,
+            expected: plan.urlSnapshots.length,
+            actual: plan.urlSnapshots.length - missingSnapshots.length,
+            message: `Missing ${missingSnapshots.length} materialized url snapshot files in base ${plan.baseId}: ${missingSnapshots
+              .slice(0, SKIP_WARNING_SAMPLE_LIMIT)
+              .map((snapshot) => snapshot.relativePath)
+              .join(', ')}`
+          })
         }
 
         const client = createClient({ url: pathToFileURL(plan.targetDbPath).toString() })

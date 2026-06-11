@@ -4,6 +4,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { createClient } from '@libsql/client'
+import { stripCherryFrontmatter } from '@main/features/knowledge/utils/sources/cherryFrontmatter'
 import { hashEmbeddingText } from '@main/features/knowledge/vectorstore/indexStore/hashing'
 import { KnowledgeIndexStore } from '@main/features/knowledge/vectorstore/indexStore/KnowledgeIndexStore'
 import { encodeVectorBlob } from '@main/features/knowledge/vectorstore/indexStore/vectorBlob'
@@ -174,7 +175,17 @@ function createDbMock({
       from: vi.fn().mockResolvedValue(migratedItems)
     })
 
-  return { select }
+  // Captures the url-snapshot row write-backs: one entry per updated item.
+  const updateCalls: Array<{ values: Record<string, unknown> }> = []
+  const update = vi.fn(() => ({
+    set: vi.fn((values: Record<string, unknown>) => ({
+      where: vi.fn(async () => {
+        updateCalls.push({ values })
+      })
+    }))
+  }))
+
+  return { select, update, updateCalls }
 }
 
 function createMigrationCtx({
@@ -539,13 +550,15 @@ describe('KnowledgeVectorMigrator', () => {
       expect(result.success).toBe(true)
       expect(migrator.preparedBasePlans).toHaveLength(1)
       expect(materialItemIds(migrator)).toEqual([MIGRATED_SITEMAP_URL_ITEM_ID])
-      // A url material has a virtual relative path (the item id) and no file extension.
+      // A url material is planned onto its materialized snapshot path (derived
+      // from the content's first line), replacing the old virtual item-id path.
       const material = migrator.preparedBasePlans[0].materials[0].input.material
       expect(material).toMatchObject({
-        relativePath: MIGRATED_SITEMAP_URL_ITEM_ID,
+        relativePath: 'sitemap page chunk.md',
         origin: 'captured',
         fileExt: undefined
       })
+      expect(migrator.preparedBasePlans[0].urlSnapshots).toHaveLength(1)
       expect(migrator.skippedCount).toBe(0)
       expect(result.warnings ?? []).not.toEqual(
         expect.arrayContaining([expect.stringContaining('non_indexable_container')])
@@ -968,6 +981,7 @@ describe('KnowledgeVectorMigrator', () => {
       migrator.preparedBasePlans = [
         {
           baseId: 'progress',
+          baseDirPath: path.join(knowledgeBaseDir, 'progress'),
           targetDbPath: dbPath,
           dimensions: 2,
           embeddingModelId: 'ollama::nomic-embed-text',
@@ -978,6 +992,7 @@ describe('KnowledgeVectorMigrator', () => {
             material('item-2', 'chunk two', [2, 3]),
             material('item-3', 'chunk three', [3, 4])
           ],
+          urlSnapshots: [],
           expectedUnitCount: 4,
           expectedEmbeddingCount: 4,
           sourceRowCount: 4
@@ -1001,6 +1016,7 @@ describe('KnowledgeVectorMigrator', () => {
       migrator.preparedBasePlans = [
         {
           baseId: 'ebusy',
+          baseDirPath: path.join(knowledgeBaseDir, 'ebusy'),
           targetDbPath: dbPath,
           dimensions: 2,
           embeddingModelId: 'ollama::nomic-embed-text',
@@ -1016,6 +1032,7 @@ describe('KnowledgeVectorMigrator', () => {
               }
             }
           ],
+          urlSnapshots: [],
           expectedUnitCount: 1,
           expectedEmbeddingCount: 1,
           sourceRowCount: 1
@@ -1123,6 +1140,178 @@ describe('KnowledgeVectorMigrator', () => {
       expect(validateResult.errors).toContainEqual(
         expect.objectContaining({ key: `knowledge_vector_embedding_count_mismatch_${MIGRATED_KNOWLEDGE_BASE_ID}` })
       )
+    })
+
+    it('materializes a migrated url as a frontmatter-stamped snapshot and pins the item row', async () => {
+      await createLegacyVectorDb(path.join(knowledgeBaseDir, LEGACY_KNOWLEDGE_BASE_ID), [
+        {
+          id: 'legacy-url-0',
+          pageContent: '# LLM Guide',
+          uniqueLoaderId: 'loader-url-a',
+          source: 'https://example.com/guide',
+          vector: [1, 2]
+        },
+        {
+          id: 'legacy-url-1',
+          pageContent: 'second chunk',
+          uniqueLoaderId: 'loader-url-b',
+          source: 'https://example.com/guide',
+          vector: [3, 4]
+        }
+      ])
+
+      const migrationCtx = createMigrationCtx({
+        migratedBases: [createMigratedBase()],
+        migratedItems: [
+          createMigratedItem(MIGRATED_SITEMAP_URL_ITEM_ID, {
+            type: 'url',
+            data: { source: 'https://example.com/guide', url: 'https://example.com/guide' }
+          })
+        ],
+        reduxData: {
+          knowledge: {
+            bases: [
+              {
+                id: LEGACY_KNOWLEDGE_BASE_ID,
+                name: 'Base 1',
+                items: [{ id: 'item-sitemap', type: 'sitemap', uniqueIds: ['loader-url-a', 'loader-url-b'] }]
+              }
+            ]
+          }
+        }
+      })
+
+      const migrator = new KnowledgeVectorMigrator() as any
+      expect((await migrator.prepare(migrationCtx as any)).success).toBe(true)
+      expect((await migrator.execute(migrationCtx as any)).success).toBe(true)
+
+      // The snapshot lands in the base under a heading-derived name, stamped with
+      // provenance frontmatter that strips back off to exactly the stored content
+      // text — the hash round-trip that lets reindex reuse the migrated vectors.
+      const snapshotPath = path.join(knowledgeBaseDir, MIGRATED_KNOWLEDGE_BASE_ID, 'LLM Guide.md')
+      expect(fs.existsSync(snapshotPath)).toBe(true)
+      const fileText = fs.readFileSync(snapshotPath, 'utf-8')
+      expect(fileText).toMatch(/^---\ncherry:\n {2}type: url-snapshot\n {2}source: "https:\/\/example\.com\/guide"\n/)
+      expect(fileText).toMatch(/ {2}captured_at: "\d{4}-\d{2}-\d{2}T[^"]+"\n/)
+      expect(fileText).toContain('  origin: "v1-migration"\n')
+
+      const store = await readStore(MIGRATED_KNOWLEDGE_BASE_ID)
+      expect(store.content[0].text).toBe('# LLM Guide\n\nsecond chunk')
+      expect(stripCherryFrontmatter(fileText)).toBe(store.content[0].text)
+
+      // The material row uses the real snapshot path, not the virtual item id.
+      expect(store.material[0]).toMatchObject({
+        material_id: MIGRATED_SITEMAP_URL_ITEM_ID,
+        relative_path: 'LLM Guide.md',
+        origin: 'captured'
+      })
+
+      // The item row is pinned so the first reindex reads the snapshot offline.
+      expect(migrationCtx.db.updateCalls).toHaveLength(1)
+      expect(migrationCtx.db.updateCalls[0].values).toEqual({
+        data: {
+          source: 'https://example.com/guide',
+          url: 'https://example.com/guide',
+          relativePath: 'LLM Guide.md'
+        }
+      })
+
+      const validateResult = await migrator.validate(migrationCtx as any)
+      expect(validateResult.success).toBe(true)
+      expect(validateResult.errors).toStrictEqual([])
+    })
+
+    it('dedupes the snapshot name around paths other items already occupy', async () => {
+      await createLegacyVectorDb(path.join(knowledgeBaseDir, LEGACY_KNOWLEDGE_BASE_ID), [
+        {
+          id: 'legacy-url-0',
+          pageContent: '# LLM Guide',
+          uniqueLoaderId: 'loader-url-a',
+          source: 'https://example.com/guide',
+          vector: [1, 2]
+        }
+      ])
+
+      const migrationCtx = createMigrationCtx({
+        migratedBases: [createMigratedBase()],
+        migratedItems: [
+          createMigratedItem(MIGRATED_FILE_ITEM_ID, {
+            data: { source: '/tmp/LLM Guide.md', relativePath: 'LLM Guide.md' }
+          }),
+          createMigratedItem(MIGRATED_SITEMAP_URL_ITEM_ID, {
+            type: 'url',
+            data: { source: 'https://example.com/guide', url: 'https://example.com/guide' }
+          })
+        ],
+        reduxData: {
+          knowledge: {
+            bases: [
+              {
+                id: LEGACY_KNOWLEDGE_BASE_ID,
+                name: 'Base 1',
+                items: [{ id: 'item-sitemap', type: 'sitemap', uniqueIds: ['loader-url-a'] }]
+              }
+            ]
+          }
+        }
+      })
+
+      const migrator = new KnowledgeVectorMigrator() as any
+      expect((await migrator.prepare(migrationCtx as any)).success).toBe(true)
+      expect((await migrator.execute(migrationCtx as any)).success).toBe(true)
+
+      expect(fs.existsSync(path.join(knowledgeBaseDir, MIGRATED_KNOWLEDGE_BASE_ID, 'LLM Guide-1.md'))).toBe(true)
+      const store = await readStore(MIGRATED_KNOWLEDGE_BASE_ID)
+      expect(store.material[0]).toMatchObject({ relative_path: 'LLM Guide-1.md' })
+    })
+
+    it('reuses an already-pinned relativePath on re-run instead of renaming', async () => {
+      await createLegacyVectorDb(path.join(knowledgeBaseDir, LEGACY_KNOWLEDGE_BASE_ID), [
+        {
+          id: 'legacy-url-0',
+          pageContent: '# LLM Guide',
+          uniqueLoaderId: 'loader-url-a',
+          source: 'https://example.com/guide',
+          vector: [1, 2]
+        }
+      ])
+
+      const migrationCtx = createMigrationCtx({
+        migratedBases: [createMigratedBase()],
+        migratedItems: [
+          createMigratedItem(MIGRATED_SITEMAP_URL_ITEM_ID, {
+            type: 'url',
+            data: { source: 'https://example.com/guide', url: 'https://example.com/guide', relativePath: 'Pinned.md' }
+          })
+        ],
+        reduxData: {
+          knowledge: {
+            bases: [
+              {
+                id: LEGACY_KNOWLEDGE_BASE_ID,
+                name: 'Base 1',
+                items: [{ id: 'item-sitemap', type: 'sitemap', uniqueIds: ['loader-url-a'] }]
+              }
+            ]
+          }
+        }
+      })
+
+      const migrator = new KnowledgeVectorMigrator() as any
+      expect((await migrator.prepare(migrationCtx as any)).success).toBe(true)
+      expect((await migrator.execute(migrationCtx as any)).success).toBe(true)
+
+      expect(fs.existsSync(path.join(knowledgeBaseDir, MIGRATED_KNOWLEDGE_BASE_ID, 'Pinned.md'))).toBe(true)
+      expect(fs.existsSync(path.join(knowledgeBaseDir, MIGRATED_KNOWLEDGE_BASE_ID, 'Pinned-1.md'))).toBe(false)
+      const store = await readStore(MIGRATED_KNOWLEDGE_BASE_ID)
+      expect(store.material[0]).toMatchObject({ relative_path: 'Pinned.md' })
+      expect(migrationCtx.db.updateCalls[0].values).toEqual({
+        data: {
+          source: 'https://example.com/guide',
+          url: 'https://example.com/guide',
+          relativePath: 'Pinned.md'
+        }
+      })
     })
   })
 })
