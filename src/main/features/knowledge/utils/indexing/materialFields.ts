@@ -13,10 +13,18 @@ export type MaterialFieldSource =
   | Pick<KnowledgeItemOf<'url'>, 'id' | 'type' | 'data'>
   | Pick<KnowledgeItemOf<'note'>, 'id' | 'type' | 'data'>
 
-/** A material's stable relative path: the file's path for files, else the item id (notes/URLs have no file). */
+/**
+ * A material's stable relative path. A file uses its stored path (the processed
+ * artifact when present). A url uses its captured snapshot path once it has one —
+ * the snapshot is a real base file under `raw/` — and only falls back to the item
+ * id while no snapshot exists yet. A note has no base file, so it uses the item id.
+ */
 export function toMaterialRelativePath(item: MaterialFieldSource): string {
   if (item.type === 'file') {
     return item.data.indexedRelativePath ?? item.data.relativePath
+  }
+  if (item.type === 'url') {
+    return item.data.relativePath ?? item.id
   }
   return item.id
 }

@@ -248,6 +248,10 @@ describe('index-documents job handler', () => {
     expect(loadKnowledgeItemDocumentsMock).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'url-1', data: expect.objectContaining({ relativePath: 'example-page.md' }) })
     )
+    // The material's relative_path is the real snapshot path under `raw/`, not the
+    // item-id virtual placeholder — so it points at the bytes captureUrlSnapshotFile
+    // wrote and agrees with what the v1→v2 migrator stamps for the same url.
+    expect(lastRebuildInput().material.relativePath).toBe('example-page.md')
   })
 
   it('does not fetch a URL that already has a captured snapshot', async () => {
@@ -280,6 +284,9 @@ describe('index-documents job handler', () => {
     expect(loadKnowledgeItemDocumentsMock).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ relativePath: 'raced.md' }) })
     )
+    // The material is stamped with the raced snapshot path too — the concurrently
+    // captured file, not the item-id placeholder.
+    expect(lastRebuildInput().material.relativePath).toBe('raced.md')
   })
 
   it('fails the index when a URL fetch returns empty markdown', async () => {

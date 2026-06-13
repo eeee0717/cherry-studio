@@ -84,7 +84,10 @@ export function createIndexDocumentsJobHandler(
         knowledgeItemService.updateStatus(ctx.input.itemId, 'embedding')
       )
 
-      const rebuildInput = await buildRebuildMaterialInput(ctx, base, item, chunked)
+      // Use readableItem, not item: for a freshly captured url it carries the snapshot
+      // relativePath, so the material's relative_path is the real `raw/` snapshot path
+      // (matching the migrator) instead of the item-id virtual placeholder.
+      const rebuildInput = await buildRebuildMaterialInput(ctx, base, readableItem, chunked)
 
       // The atomic material rebuild and final status flip must stay together under the base mutation lock.
       reportKnowledgeProgress(ctx, 80, { stage: 'writing', currentFile: 0, totalFiles: 1 })
