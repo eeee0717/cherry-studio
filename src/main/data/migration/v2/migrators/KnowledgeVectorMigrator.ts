@@ -17,7 +17,7 @@ import {
 import { deriveUrlSnapshotSlug } from '@main/features/knowledge/utils/sources/urlSnapshot'
 import {
   collectKnowledgeReservedRelativePaths,
-  dedupeKnowledgeRelativePath
+  reserveImportedFileRelativePath
 } from '@main/features/knowledge/utils/storage/pathStorage'
 import { hashEmbeddingText } from '@main/features/knowledge/vectorstore/indexStore/hashing'
 import { ensureIndexMeta } from '@main/features/knowledge/vectorstore/indexStore/indexMeta'
@@ -466,8 +466,9 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
             // instead of deduping into a useless `name-1.md` twin.
             const relativePath =
               item.data.relativePath ??
-              dedupeKnowledgeRelativePath(
+              reserveImportedFileRelativePath(
                 `${deriveUrlSnapshotSlug(material.input.content.text, item.data.url)}.md`,
+                false,
                 reservedPaths
               )
             material.input.material.relativePath = relativePath

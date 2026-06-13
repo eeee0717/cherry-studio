@@ -1,6 +1,6 @@
 import { sanitizeFilename } from '@shared/file/types/filename'
 
-import { dedupeKnowledgeRelativePath, writeFileIntoKnowledgeBaseAt } from '../storage/pathStorage'
+import { reserveImportedFileRelativePath, writeFileIntoKnowledgeBaseAt } from '../storage/pathStorage'
 import { serializeCherryUrlSnapshotFrontmatter } from './cherryFrontmatter'
 
 const SNAPSHOT_TITLE_MAX = 80
@@ -57,7 +57,11 @@ export async function captureUrlSnapshotFile(
   markdown: string,
   reservedPaths: Set<string>
 ): Promise<string> {
-  const relativePath = dedupeKnowledgeRelativePath(`${deriveUrlSnapshotSlug(markdown, url)}.md`, reservedPaths)
+  const relativePath = reserveImportedFileRelativePath(
+    `${deriveUrlSnapshotSlug(markdown, url)}.md`,
+    false,
+    reservedPaths
+  )
   const frontmatter = serializeCherryUrlSnapshotFrontmatter({
     source: url,
     capturedAt: new Date().toISOString()

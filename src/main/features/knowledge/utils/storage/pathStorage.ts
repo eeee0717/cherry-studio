@@ -73,37 +73,14 @@ export function getProcessedMarkdownRelativePath(relativePath: string): string {
   return normalizeRelativePath(path.join(parsed.dir, `${parsed.name}.md`))
 }
 
-/** Insert a numeric suffix before the extension: `foo.pdf` + 2 → `foo-2.pdf`. */
-export function withRelativePathSuffix(name: string, suffix: number): string {
-  const ext = path.extname(name)
-  const stem = name.slice(0, name.length - ext.length)
-  return `${stem}-${suffix}${ext}`
-}
-
 /**
- * Make `name` unique within `used`, inserting a numeric suffix before the
- * extension on collision (`foo.pdf` → `foo-1.pdf` → `foo-2.pdf`). The chosen
- * name is added to `used`. Used by the URL-snapshot capture path (and its
- * migrator equivalent) to keep snapshot file names collision-free.
- */
-export function dedupeKnowledgeRelativePath(name: string, used: Set<string>): string {
-  let candidate = name
-  let suffix = 1
-  while (used.has(candidate)) {
-    candidate = withRelativePathSuffix(name, suffix)
-    suffix += 1
-  }
-  used.add(candidate)
-  return candidate
-}
-
-/**
- * Reserve a free relative path for an imported source file (auto-renaming on collision via
+ * Reserve a free relative path for an imported material (auto-renaming on collision via
  * a `_N` suffix) and return it. When `reserveProcessedArtifact`, the prospective
  * processed-markdown sibling must also be free at the chosen suffix, and both are reserved
  * together — so a processor later emitting `paper.md` can never disagree with the source.
- * Mutates `reservedPaths`. File imports (upload + the v1→v2 migrator's copied files) reserve
- * names through it.
+ * Mutates `reservedPaths`. The single dedup entry point: file imports (upload + the v1→v2
+ * migrator's copied files) and URL-snapshot capture/restore all reserve names through it
+ * (snapshots pass `false` — markdown has no processed artifact).
  */
 export function reserveImportedFileRelativePath(
   sourceRelativePath: string,

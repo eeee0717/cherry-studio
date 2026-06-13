@@ -30,7 +30,6 @@ import { planKnowledgeItemSource } from './utils/sources/sourcePlanning'
 import {
   assertKnowledgeFileTargetAvailable,
   copyFileIntoKnowledgeBaseAt,
-  dedupeKnowledgeRelativePath,
   deleteKnowledgeItemFilesBestEffort,
   getKnowledgeBaseFilePath,
   getKnowledgeSourceRelativePath,
@@ -310,7 +309,7 @@ export class KnowledgeWorkflowService {
       // collision-free name and pin the item to it, so the first index reads the
       // snapshot offline (see ensureUrlSnapshot) instead of re-fetching the page.
       const snapshotName = getKnowledgeSourceRelativePath(input.data.snapshotPath)
-      const relativePath = dedupeKnowledgeRelativePath(snapshotName, reservedPaths)
+      const relativePath = reserveImportedFileRelativePath(snapshotName, false, reservedPaths)
       await copyFileIntoKnowledgeBaseAt(baseId, input.data.snapshotPath, relativePath)
       return {
         groupId: input.groupId,

@@ -1250,9 +1250,9 @@ describe('KnowledgeVectorMigrator', () => {
       expect((await migrator.prepare(migrationCtx as any)).success).toBe(true)
       expect((await migrator.execute(migrationCtx as any)).success).toBe(true)
 
-      expect(fs.existsSync(path.join(knowledgeBaseDir, MIGRATED_KNOWLEDGE_BASE_ID, 'LLM Guide-1.md'))).toBe(true)
+      expect(fs.existsSync(path.join(knowledgeBaseDir, MIGRATED_KNOWLEDGE_BASE_ID, 'LLM Guide_1.md'))).toBe(true)
       const store = await readStore(MIGRATED_KNOWLEDGE_BASE_ID)
-      expect(store.material[0]).toMatchObject({ relative_path: 'LLM Guide-1.md' })
+      expect(store.material[0]).toMatchObject({ relative_path: 'LLM Guide_1.md' })
     })
 
     it('reuses an already-pinned relativePath on re-run instead of renaming', async () => {
@@ -1292,7 +1292,7 @@ describe('KnowledgeVectorMigrator', () => {
       expect((await migrator.execute(migrationCtx as any)).success).toBe(true)
 
       expect(fs.existsSync(path.join(knowledgeBaseDir, MIGRATED_KNOWLEDGE_BASE_ID, 'Pinned.md'))).toBe(true)
-      expect(fs.existsSync(path.join(knowledgeBaseDir, MIGRATED_KNOWLEDGE_BASE_ID, 'Pinned-1.md'))).toBe(false)
+      expect(fs.existsSync(path.join(knowledgeBaseDir, MIGRATED_KNOWLEDGE_BASE_ID, 'Pinned_1.md'))).toBe(false)
       const store = await readStore(MIGRATED_KNOWLEDGE_BASE_ID)
       expect(store.material[0]).toMatchObject({ relative_path: 'Pinned.md' })
       expect(migrationCtx.db.updateCalls[0].values).toEqual({

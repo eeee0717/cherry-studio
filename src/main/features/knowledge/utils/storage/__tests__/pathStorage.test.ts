@@ -46,8 +46,6 @@ const {
   getKnowledgeSourceRelativePath,
   toKnowledgeRelativePath,
   getProcessedMarkdownRelativePath,
-  withRelativePathSuffix,
-  dedupeKnowledgeRelativePath,
   reserveImportedFileRelativePath,
   copyFileIntoKnowledgeBaseAt,
   writeFileIntoKnowledgeBaseAt,
@@ -117,32 +115,6 @@ describe('pathStorage relative-path safety', () => {
 
     it('rejects an unsafe relative path', () => {
       expect(() => getProcessedMarkdownRelativePath('../x.pdf')).toThrow('Invalid knowledge relative path')
-    })
-  })
-
-  describe('withRelativePathSuffix', () => {
-    it('inserts the suffix before the extension', () => {
-      expect(withRelativePathSuffix('report.pdf', 2)).toBe('report-2.pdf')
-      expect(withRelativePathSuffix('sub/report.pdf', 1)).toBe('sub/report-1.pdf')
-    })
-
-    it('appends the suffix when there is no extension', () => {
-      expect(withRelativePathSuffix('README', 3)).toBe('README-3')
-    })
-  })
-
-  describe('dedupeKnowledgeRelativePath', () => {
-    it('returns the name unchanged on the first use and reserves it', () => {
-      const used = new Set<string>()
-      expect(dedupeKnowledgeRelativePath('a.md', used)).toBe('a.md')
-      expect(used.has('a.md')).toBe(true)
-    })
-
-    it('inserts an incrementing numeric suffix on repeated collisions', () => {
-      const used = new Set<string>()
-      expect(dedupeKnowledgeRelativePath('a.md', used)).toBe('a.md')
-      expect(dedupeKnowledgeRelativePath('a.md', used)).toBe('a-1.md')
-      expect(dedupeKnowledgeRelativePath('a.md', used)).toBe('a-2.md')
     })
   })
 

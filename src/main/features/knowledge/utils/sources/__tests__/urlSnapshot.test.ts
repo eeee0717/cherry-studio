@@ -17,7 +17,7 @@ vi.mock('@logger', () => ({
   }
 }))
 
-// Keep dedupeKnowledgeRelativePath real (it is pure); only stub the disk write so
+// Keep reserveImportedFileRelativePath real (it is pure); only stub the disk write so
 // the test exercises name derivation + dedupe without touching the filesystem.
 vi.mock('../../storage/pathStorage', async () => {
   const actual = await vi.importActual<typeof PathStorage>('../../storage/pathStorage')
@@ -83,7 +83,7 @@ describe('captureUrlSnapshotFile', () => {
     const reserved = new Set<string>(['My Page.md'])
     const relativePath = await captureUrlSnapshotFile('kb-1', 'https://example.com/p', '# My Page\n\nbody', reserved)
 
-    expect(relativePath).toBe('My Page-1.md')
-    expect(writeFileIntoKnowledgeBaseAtMock).toHaveBeenCalledWith('kb-1', 'My Page-1.md', expect.any(String))
+    expect(relativePath).toBe('My Page_1.md')
+    expect(writeFileIntoKnowledgeBaseAtMock).toHaveBeenCalledWith('kb-1', 'My Page_1.md', expect.any(String))
   })
 })
