@@ -128,8 +128,8 @@ export async function writeFileIntoKnowledgeBaseAt(
 
 /**
  * Collect the base-relative paths already occupied by an item set — every file's
- * source and indexed-artifact path, and every captured URL snapshot path. Used to
- * pick a non-colliding name for a new snapshot.
+ * source and indexed-artifact path, and every captured URL/note snapshot path. Used
+ * to pick a non-colliding name for a new snapshot.
  */
 export function collectKnowledgeReservedRelativePaths(items: Array<{ type: string; data: unknown }>): Set<string> {
   const reserved = new Set<string>()

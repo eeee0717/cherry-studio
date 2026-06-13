@@ -936,6 +936,76 @@ describe('KnowledgeService', () => {
     )
   })
 
+  it('auto-renames a file whose name collides with an existing note snapshot', async () => {
+    const service = new KnowledgeService()
+    knowledgeBaseGetByIdMock.mockResolvedValue(createBase({ fileProcessorId: null }))
+    // The base already holds a note whose captured snapshot occupies `Meeting notes.md` under `raw/`.
+    knowledgeItemGetItemsByBaseIdMock.mockResolvedValue([
+      {
+        ...createNoteItem('existing-note', 'kb-1'),
+        type: 'note' as const,
+        data: { source: 'Meeting notes', content: 'hello', relativePath: 'Meeting notes.md' }
+      }
+    ])
+    knowledgeItemCreateMock.mockResolvedValueOnce(createFileItem('file-1', 'kb-1', '/Users/me/Meeting notes.md'))
+    knowledgeItemUpdateStatusMock.mockResolvedValueOnce(
+      createFileItem('file-1', 'kb-1', '/Users/me/Meeting notes.md', 'processing')
+    )
+    knowledgeItemGetByIdMock.mockResolvedValueOnce(
+      createFileItem('file-1', 'kb-1', '/Users/me/Meeting notes.md', 'processing')
+    )
+
+    await service.addItems('kb-1', [
+      { type: 'file', data: { source: '/Users/me/Meeting notes.md', path: '/Users/me/Meeting notes.md' } }
+    ])
+
+    // The new file's name collides with the existing note's reserved snapshot path, so it is
+    // deduped to `_N` instead of hard-failing the on-disk copy — note snapshots must enter the
+    // reserved set just like url snapshots (they too live as base files under `raw/`).
+    expect(copyFileIntoKnowledgeBaseAtMock).toHaveBeenCalledWith(
+      'kb-1',
+      '/Users/me/Meeting notes.md',
+      'Meeting notes_1.md'
+    )
+    expect(knowledgeItemCreateMock).toHaveBeenCalledWith(
+      'kb-1',
+      expect.objectContaining({
+        type: 'file',
+        data: { source: '/Users/me/Meeting notes.md', relativePath: 'Meeting notes_1.md' }
+      })
+    )
+  })
+
+  it('throws when a file’s processed-markdown name collides with an existing note snapshot', async () => {
+    const service = new KnowledgeService()
+    const processingFile = createFileItem('file-1', 'kb-1', '/docs/source.pdf', 'processing')
+    knowledgeBaseGetByIdMock.mockResolvedValue(createBase({ fileProcessorId: 'doc2x' }))
+    knowledgeItemGetByIdMock.mockResolvedValueOnce(processingFile)
+    // An existing note already occupies the `source.md` path the processor would write its output to.
+    knowledgeItemGetItemsByBaseIdMock.mockResolvedValue([
+      {
+        ...createNoteItem('existing-note', 'kb-1'),
+        type: 'note' as const,
+        data: { source: 'Source', content: 'hello', relativePath: 'source.md' }
+      }
+    ])
+
+    const workflowService = (
+      service as unknown as {
+        workflowService: {
+          scheduleItem(baseId: string, itemId: string, parentJobId?: string | null): Promise<void>
+        }
+      }
+    ).workflowService
+
+    // The processed-artifact reservation guard must treat the note snapshot as occupied (it lives
+    // under `raw/` too), so it refuses the colliding `.md` output instead of overwriting it on disk.
+    await expect(workflowService.scheduleItem('kb-1', 'file-1')).rejects.toThrow(
+      'Knowledge file already exists: source.md'
+    )
+    expect(fileProcessingStartJobMock).not.toHaveBeenCalled()
+  })
+
   it('passes the parent job when starting file processing during reindex', async () => {
     const service = new KnowledgeService()
     const processingFile = createFileItem('file-1', 'kb-1', '/docs/source.pdf', 'processing')

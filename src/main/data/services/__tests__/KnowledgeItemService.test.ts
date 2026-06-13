@@ -1097,6 +1097,46 @@ describe('KnowledgeItemService', () => {
     })
   })
 
+  describe('updateNoteSnapshotRelativePath', () => {
+    it('stores the captured snapshot path on note item data, preserving source/content', async () => {
+      await seedItem({
+        id: NOTE_A_ID,
+        type: 'note',
+        data: { source: 'Meeting notes', content: '# Meeting\n\nbody' }
+      })
+
+      const result = await service.updateNoteSnapshotRelativePath(NOTE_A_ID, 'Meeting notes.md')
+
+      expect(result).toMatchObject({
+        id: NOTE_A_ID,
+        type: 'note',
+        data: {
+          source: 'Meeting notes',
+          content: '# Meeting\n\nbody',
+          relativePath: 'Meeting notes.md'
+        }
+      })
+    })
+
+    it('rejects updating snapshot path for a missing knowledge item', async () => {
+      await expect(service.updateNoteSnapshotRelativePath(OTHER_ITEM_ID, 'note.md')).rejects.toMatchObject({
+        code: ErrorCode.NOT_FOUND
+      })
+    })
+
+    it('rejects updating snapshot path for a non-note item', async () => {
+      await seedItem({
+        id: ITEM_1_ID,
+        type: 'url',
+        data: { source: 'https://example.com', url: 'https://example.com' }
+      })
+
+      await expect(service.updateNoteSnapshotRelativePath(ITEM_1_ID, 'note.md')).rejects.toMatchObject({
+        code: ErrorCode.VALIDATION_ERROR
+      })
+    })
+  })
+
   describe('container reconciliation', () => {
     async function getItemRow(id: string) {
       const [row] = await dbh.db.select().from(knowledgeItemTable).where(eq(knowledgeItemTable.id, id)).limit(1)

@@ -211,15 +211,16 @@ describe('pathStorage relative-path safety', () => {
   })
 
   describe('collectKnowledgeReservedRelativePaths', () => {
-    it('collects file source and indexed-artifact paths and url snapshot paths', () => {
+    it('collects file source and indexed-artifact paths and url/note snapshot paths', () => {
       const reserved = collectKnowledgeReservedRelativePaths([
         { type: 'file', data: { relativePath: 'a.pdf', indexedRelativePath: 'a.md' } },
         { type: 'url', data: { source: 'https://x', url: 'https://x', relativePath: 'x.md' } },
-        { type: 'note', data: { source: 'n', content: 'body' } },
+        { type: 'note', data: { source: 'n', content: 'body', relativePath: 'n.md' } },
+        { type: 'note', data: { source: 'uncaptured', content: 'body' } },
         { type: 'directory', data: { source: 'd', path: '/d' } }
       ])
 
-      expect(reserved).toEqual(new Set(['a.pdf', 'a.md', 'x.md']))
+      expect(reserved).toEqual(new Set(['a.pdf', 'a.md', 'x.md', 'n.md']))
     })
 
     it('ignores items with non-string or missing path fields', () => {

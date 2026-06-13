@@ -109,8 +109,8 @@ const AddKnowledgeItemDialog = ({ open, onOpenChange }: AddKnowledgeItemDialogPr
   const handleNoteToggle = useCallback((note: NoteItem) => {
     setSubmitErrorMessage('')
     setSelectedNotes((currentNotes) =>
-      currentNotes.some((selected) => selected.id === note.id)
-        ? currentNotes.filter((selected) => selected.id !== note.id)
+      currentNotes.some((selected) => selected.externalPath === note.externalPath)
+        ? currentNotes.filter((selected) => selected.externalPath !== note.externalPath)
         : [...currentNotes, note]
     )
   }, [])
@@ -207,13 +207,14 @@ const AddKnowledgeItemDialog = ({ open, onOpenChange }: AddKnowledgeItemDialogPr
 
       if (activeSource === 'note') {
         return Promise.all(
-          selectedNotes.map(async (note) => ({
-            type: 'note' as const,
-            data: {
-              source: note.name,
-              content: await window.api.file.readExternal(note.externalPath)
-            }
-          }))
+          selectedNotes.map(async (note) => {
+            // Name the note in the failure so a read error (e.g. it was moved or
+            // deleted while the dialog was open) points at the specific source.
+            const content = await window.api.file.readExternal(note.externalPath).catch((cause) => {
+              throw new Error(`${note.name}: ${cause instanceof Error ? cause.message : String(cause)}`)
+            })
+            return { type: 'note' as const, data: { source: note.name, content } }
+          })
         ).then((items) => submitKnowledgeItems(items))
       }
 

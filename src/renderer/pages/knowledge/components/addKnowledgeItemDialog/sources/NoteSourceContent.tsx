@@ -30,7 +30,7 @@ function collectNoteFiles(nodes: NotesTreeNode[]): NotesTreeNode[] {
 const NoteSourceContent = ({ selectedNotes, onToggle }: NoteSourceContentProps) => {
   const { t } = useTranslation()
   const { notesPath } = useNotesSettings()
-  const { root, isLoading } = useDirectoryTree(notesPath || undefined)
+  const { root, isLoading, error } = useDirectoryTree(notesPath || undefined)
 
   const noteFiles = useMemo(() => {
     if (!root || !notesPath) {
@@ -39,13 +39,23 @@ const NoteSourceContent = ({ selectedNotes, onToggle }: NoteSourceContentProps) 
     return collectNoteFiles(projectNotesTree(root, notesPath))
   }, [root, notesPath])
 
-  const selectedIds = useMemo(() => new Set(selectedNotes.map((note) => note.id)), [selectedNotes])
+  const selectedPaths = useMemo(() => new Set(selectedNotes.map((note) => note.externalPath)), [selectedNotes])
 
   const renderBody = () => {
     if (isLoading) {
       return (
         <div className="flex min-h-24 min-w-0 flex-1 items-center justify-center text-foreground-muted text-xs leading-4">
           {t('knowledge.data_source.add_dialog.note.loading')}
+        </div>
+      )
+    }
+
+    // A failed tree read also leaves `root` null; surface it as an error so the user
+    // is not told to "create some notes" when the real problem is a read failure.
+    if (error) {
+      return (
+        <div className="flex min-h-24 min-w-0 flex-1 items-center justify-center rounded-md border border-error-border bg-error-bg p-4 text-center text-error-text text-xs leading-4">
+          {t('notes.tree_load_failed')}
         </div>
       )
     }
@@ -76,13 +86,12 @@ const NoteSourceContent = ({ selectedNotes, onToggle }: NoteSourceContentProps) 
           {noteFiles.map((note) => (
             <label
               key={note.externalPath}
+              role="listitem"
               className="grid min-w-0 max-w-full cursor-pointer grid-cols-[auto_auto_minmax(0,1fr)_minmax(0,max-content)] items-center gap-1.5 overflow-hidden rounded-md bg-background-subtle px-2 py-1.5 hover:bg-accent/40">
               <Checkbox
                 size="sm"
-                checked={selectedIds.has(note.externalPath)}
-                onCheckedChange={() =>
-                  onToggle({ id: note.externalPath, name: note.name, externalPath: note.externalPath })
-                }
+                checked={selectedPaths.has(note.externalPath)}
+                onCheckedChange={() => onToggle({ name: note.name, externalPath: note.externalPath })}
               />
               <NotebookPen className="size-3.5 shrink-0 text-foreground-muted" />
               <span className="min-w-0 truncate text-foreground text-xs leading-4" title={note.name}>

@@ -360,11 +360,11 @@ export class KnowledgeWorkflowService {
     const items = await knowledgeItemService.getItemsByBaseId(baseId)
 
     for (const item of items) {
-      if (item.type === 'url') {
-        // URL snapshots live as base files under `raw/` too; reserve any already-captured
-        // snapshot path so a restored snapshot with a colliding name auto-renames to `_N`
-        // instead of hard-failing the on-disk copy (mirrors collectKnowledgeReservedRelativePaths,
-        // the all-type reserved set ensureUrlSnapshot uses on the index path).
+      if (item.type === 'url' || item.type === 'note') {
+        // URL/note snapshots live as base files under `raw/` too; reserve any already-captured
+        // snapshot path so a colliding new copy auto-renames to `_N` instead of hard-failing
+        // the on-disk copy (mirrors collectKnowledgeReservedRelativePaths, the all-type reserved
+        // set ensure{Url,Note}Snapshot use on the index path).
         if (item.data.relativePath) {
           reservedPaths.add(item.data.relativePath)
         }
@@ -394,7 +394,17 @@ export class KnowledgeWorkflowService {
   ): Promise<void> {
     const items = await knowledgeItemService.getItemsByBaseId(baseId)
     const conflictingItem = items.find((item) => {
-      if (item.id === itemId || item.type !== 'file') {
+      if (item.id === itemId) {
+        return false
+      }
+
+      // URL/note snapshots also occupy a `raw/` path; a processed-artifact name that
+      // lands on one would collide on disk, so treat them as reserved here too.
+      if (item.type === 'url' || item.type === 'note') {
+        return item.data.relativePath === relativePath
+      }
+
+      if (item.type !== 'file') {
         return false
       }
 
