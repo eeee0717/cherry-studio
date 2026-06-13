@@ -9,6 +9,14 @@ export interface DirectoryItem {
   path: string
 }
 
+export interface NoteItem {
+  /** Absolute note path — the dedupe key and the source we read content from. */
+  id: string
+  /** Note title (no extension); becomes the knowledge item's `source`. */
+  name: string
+  externalPath: string
+}
+
 export interface SourceTabDefinition {
   labelKey: string
   value: KnowledgeItemType

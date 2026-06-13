@@ -10,7 +10,7 @@ import AddKnowledgeItemDialogFooter from './addKnowledgeItemDialog/AddKnowledgeI
 import AddKnowledgeItemDialogHeader from './addKnowledgeItemDialog/AddKnowledgeItemDialogHeader'
 import AddKnowledgeItemDialogSourceTabs from './addKnowledgeItemDialog/AddKnowledgeItemDialogSourceTabs'
 import { DEFAULT_SOURCE_TYPE } from './addKnowledgeItemDialog/constants'
-import type { DirectoryItem, DropzoneOnDrop } from './addKnowledgeItemDialog/types'
+import type { DirectoryItem, DropzoneOnDrop, NoteItem } from './addKnowledgeItemDialog/types'
 
 interface AddKnowledgeItemDialogProps {
   open: boolean
@@ -50,6 +50,7 @@ const AddKnowledgeItemDialog = ({ open, onOpenChange }: AddKnowledgeItemDialogPr
   const [activeSource, setActiveSource] = useState(DEFAULT_SOURCE_TYPE)
   const [selectedFiles, setSelectedFiles] = useState<File[]>([])
   const [selectedDirectories, setSelectedDirectories] = useState<DirectoryItem[]>([])
+  const [selectedNotes, setSelectedNotes] = useState<NoteItem[]>([])
   const [urlValue, setUrlValue] = useState('')
   const [submitErrorMessage, setSubmitErrorMessage] = useState('')
   const [isResolvingSubmit, setIsResolvingSubmit] = useState(false)
@@ -59,6 +60,7 @@ const AddKnowledgeItemDialog = ({ open, onOpenChange }: AddKnowledgeItemDialogPr
     setActiveSource(DEFAULT_SOURCE_TYPE)
     setSelectedFiles([])
     setSelectedDirectories([])
+    setSelectedNotes([])
     setUrlValue('')
     setSubmitErrorMessage('')
     setIsResolvingSubmit(false)
@@ -104,6 +106,15 @@ const AddKnowledgeItemDialog = ({ open, onOpenChange }: AddKnowledgeItemDialogPr
     )
   }, [])
 
+  const handleNoteToggle = useCallback((note: NoteItem) => {
+    setSubmitErrorMessage('')
+    setSelectedNotes((currentNotes) =>
+      currentNotes.some((selected) => selected.id === note.id)
+        ? currentNotes.filter((selected) => selected.id !== note.id)
+        : [...currentNotes, note]
+    )
+  }, [])
+
   useEffect(() => {
     if (!open) {
       resetDialogState()
@@ -145,9 +156,9 @@ const AddKnowledgeItemDialog = ({ open, onOpenChange }: AddKnowledgeItemDialogPr
       case 'url':
         return urlValue.trim().length > 0
       case 'note':
-        return false
+        return selectedNotes.length > 0
     }
-  }, [activeSource, selectedBaseId, selectedDirectories.length, selectedFiles.length, urlValue])
+  }, [activeSource, selectedBaseId, selectedDirectories.length, selectedFiles.length, selectedNotes.length, urlValue])
 
   const handleSubmit = useCallback(() => {
     if (!canSubmit || isResolvingSubmit) {
@@ -194,6 +205,18 @@ const AddKnowledgeItemDialog = ({ open, onOpenChange }: AddKnowledgeItemDialogPr
         ])
       }
 
+      if (activeSource === 'note') {
+        return Promise.all(
+          selectedNotes.map(async (note) => ({
+            type: 'note' as const,
+            data: {
+              source: note.name,
+              content: await window.api.file.readExternal(note.externalPath)
+            }
+          }))
+        ).then((items) => submitKnowledgeItems(items))
+      }
+
       return Promise.resolve()
     })()
 
@@ -214,6 +237,7 @@ const AddKnowledgeItemDialog = ({ open, onOpenChange }: AddKnowledgeItemDialogPr
     isResolvingSubmit,
     selectedDirectories,
     selectedFiles,
+    selectedNotes,
     submitKnowledgeItems,
     t,
     urlValue
@@ -230,11 +254,13 @@ const AddKnowledgeItemDialog = ({ open, onOpenChange }: AddKnowledgeItemDialogPr
             activeSource={activeSource}
             selectedDirectories={selectedDirectories}
             selectedFiles={selectedFiles}
+            selectedNotes={selectedNotes}
             urlValue={urlValue}
             onDirectoryRemove={handleDirectoryRemove}
             onDirectorySelect={handleDirectorySelect}
             onFileDrop={handleFileDrop}
             onFileRemove={handleFileRemove}
+            onNoteToggle={handleNoteToggle}
             onUrlValueChange={(value) => {
               setSubmitErrorMessage('')
               setUrlValue(value)
@@ -248,6 +274,7 @@ const AddKnowledgeItemDialog = ({ open, onOpenChange }: AddKnowledgeItemDialogPr
           isSubmitting={isSubmitting}
           selectedDirectoryCount={selectedDirectories.length}
           selectedFileCount={selectedFiles.length}
+          selectedNoteCount={selectedNotes.length}
           onSubmit={handleSubmit}
         />
       </DialogContent>
