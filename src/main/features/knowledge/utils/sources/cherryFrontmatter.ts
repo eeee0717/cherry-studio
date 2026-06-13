@@ -1,9 +1,8 @@
 /**
  * The `cherry`-namespaced frontmatter block on app-written knowledge files
- * (url snapshots today; notes when the v2.x exit migration lands). The block
- * does two jobs (knowledge-technical-design.md §7, "knowledge_item exit path"):
- * it makes the file self-describing independently of any database row, and it
- * gates the strip below so user-authored frontmatter indexes untouched.
+ * (url snapshots today). The block does two jobs: it makes the file
+ * self-describing independently of any database row, and it gates the strip
+ * below so user-authored frontmatter indexes untouched.
  *
  * Serialize and strip must stay exact inverses: indexing reads the snapshot
  * file and strips this block to recover the canonical `content.text`, so any

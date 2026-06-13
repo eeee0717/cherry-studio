@@ -48,8 +48,8 @@ function urlStem(url: string): string {
  * mutation lock so two concurrent captures cannot pick the same path.
  *
  * The file is the markdown prefixed with the `cherry` frontmatter block, which
- * records the source URL on the file itself (knowledge_item exit path,
- * knowledge-technical-design.md §7); reading for indexing strips it back off.
+ * records the source URL on the file itself; reading for indexing strips it
+ * back off.
  */
 export async function captureUrlSnapshotFile(
   baseId: string,

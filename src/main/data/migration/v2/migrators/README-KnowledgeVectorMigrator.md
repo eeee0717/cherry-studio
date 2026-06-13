@@ -38,11 +38,14 @@ The source reader is initialized by `MigrationContext` with `ctx.paths.knowledge
    - This does not remove the `directory` rows from `knowledge_item`; it only prevents container-level vectors from being written into the V2 store.
 
 3. Material assembly (Route A — preserve the v1 split)
-   - One `material` per migrated item; material fields (`relative_path`, `origin`,
-     `index_policy`, `file_ext`, content `text_format`) are derived from the migrated
-     `knowledge_item` via the shared `materialFields` helpers, identical to the runtime
-     indexing job — files are `user`/`processor`, url/note are `captured` with the item id
-     as a virtual `relative_path`.
+   - One `material` per migrated item; its `relative_path` is derived from the migrated
+     `knowledge_item` via the shared `toMaterialRelativePath` helper, identical to the runtime
+     indexing job — a file uses its stored `relativePath` (the processed-artifact path when
+     present). A migrated url is pinned instead to the snapshot file materialized for it under
+     `raw/` (frontmatter-stamped from `content.text`), replacing the item-id virtual path the
+     helper would otherwise return. The store fills the rest of the row (`current_content_hash`,
+     timestamps); there is no `origin` / `index_policy` / `file_ext` column and `content` carries
+     no `text_format`.
    - The item's legacy chunk bodies are concatenated (in legacy read order) into one
      canonical `content.text` joined by the document separator (`\n\n`); each chunk becomes
      a `search_unit` whose `[char_start, char_end)` slices that text back to its exact body,
@@ -64,9 +67,11 @@ The source reader is initialized by `MigrationContext` with `ctx.paths.knowledge
      derived deterministically by the store from the material id, content and offsets.
 
 6. Identity stamp
-   - `ensureIndexMeta` writes the single `index_meta` row (schema version, base id, embedding
-     model + dimensions snapshot, chunker config hash) so the runtime opens the store without
-     re-bootstrapping and rejects a swapped/foreign `index.sqlite`.
+   - `ensureIndexMeta` writes the single `meta` identity row (schema version + base id) so the
+     runtime opens the store without re-bootstrapping and rejects a swapped/foreign
+     `index.sqlite` on a `base_id` mismatch. Build-contract snapshots (embedding model,
+     dimensions, chunker config hash) are intentionally not stored — a model/dimension change
+     creates a new base and a chunker change rebuilds the derived index.
 
 ## File-Safety Contract
 
@@ -124,4 +129,4 @@ Per successful base, the rebuilt store's row counts must match what was prepared
 - Vector rows whose `vector` payload exists but is exposed through an unsupported runtime encoding
 - Vector rows whose `vector` length disagrees with the base's recorded `dimensions`
 
-If every legacy vector row under one base is skipped, the rebuilt V2 store for that base is expected to be empty (schema + `index_meta` only). This is intentional: only vectors that can be proven to belong to migrated `knowledge_item` rows remain valid in V2.
+If every legacy vector row under one base is skipped, the rebuilt V2 store for that base is expected to be empty (schema + `meta` row only). This is intentional: only vectors that can be proven to belong to migrated `knowledge_item` rows remain valid in V2.
