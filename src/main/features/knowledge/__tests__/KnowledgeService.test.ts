@@ -700,8 +700,8 @@ describe('KnowledgeService', () => {
 
     // Both the source file and its already-processed artifact are copied into the restored base.
     expect(copyFileIntoKnowledgeBaseAtMock.mock.calls).toEqual([
-      ['restored-kb', '/mock/feature.knowledgebase.data/source-kb/report.pdf', 'report.pdf'],
-      ['restored-kb', '/mock/feature.knowledgebase.data/source-kb/report.md', 'report.md']
+      ['restored-kb', '/mock/feature.knowledgebase.data/source-kb/raw/report.pdf', 'report.pdf'],
+      ['restored-kb', '/mock/feature.knowledgebase.data/source-kb/raw/report.md', 'report.md']
     ])
     // The created item carries the artifact path.
     expect(knowledgeItemCreateMock).toHaveBeenCalledWith(
@@ -744,7 +744,7 @@ describe('KnowledgeService', () => {
     // The snapshot markdown is copied into the restored base under the same name.
     expect(copyFileIntoKnowledgeBaseAtMock).toHaveBeenCalledWith(
       'restored-kb',
-      '/mock/feature.knowledgebase.data/source-kb/example-page.md',
+      '/mock/feature.knowledgebase.data/source-kb/raw/example-page.md',
       'example-page.md'
     )
     // The created url item is pinned to the copied snapshot so first index reads it offline.
@@ -818,8 +818,8 @@ describe('KnowledgeService', () => {
     expect(fileProcessingStartJobMock).toHaveBeenCalledWith(
       {
         feature: 'document_to_markdown',
-        file: { kind: 'path', path: '/mock/feature.knowledgebase.data/kb-1/source.pdf' },
-        output: { kind: 'path', path: '/mock/feature.knowledgebase.data/kb-1/source.md' },
+        file: { kind: 'path', path: '/mock/feature.knowledgebase.data/kb-1/raw/source.pdf' },
+        output: { kind: 'path', path: '/mock/feature.knowledgebase.data/kb-1/raw/source.md' },
         context: { dataId: 'file-1' },
         processorId: 'doc2x'
       },
@@ -847,7 +847,7 @@ describe('KnowledgeService', () => {
     expect(enqueueMock).not.toHaveBeenCalledWith('knowledge.index-documents', expect.anything(), expect.anything())
   })
 
-  it('auto-renames duplicate uploaded file names instead of rejecting', async () => {
+  it('auto-renames a duplicate uploaded file name instead of rejecting the import', async () => {
     const service = new KnowledgeService()
     knowledgeBaseGetByIdMock.mockResolvedValue(createBase({ fileProcessorId: null }))
     knowledgeItemCreateMock
@@ -865,21 +865,13 @@ describe('KnowledgeService', () => {
       { type: 'file', data: { source: '/Users/me/b/notes.md', path: '/Users/me/b/notes.md' } }
     ])
 
-    // The second file claims a numeric-suffixed name rather than throwing.
-    expect(copyFileIntoKnowledgeBaseAtMock.mock.calls.map((call) => call[2])).toEqual(['notes.md', 'notes-1.md'])
-    expect(knowledgeItemCreateMock).toHaveBeenNthCalledWith(
-      1,
-      'kb-1',
-      expect.objectContaining({ type: 'file', data: { source: '/Users/me/a/notes.md', relativePath: 'notes.md' } })
-    )
-    expect(knowledgeItemCreateMock).toHaveBeenNthCalledWith(
-      2,
-      'kb-1',
-      expect.objectContaining({ type: 'file', data: { source: '/Users/me/b/notes.md', relativePath: 'notes-1.md' } })
-    )
+    // Both imports land; the second's relativePath is deduped (`_N`) rather than refused.
+    expect(knowledgeItemCreateMock).toHaveBeenCalledTimes(2)
+    expect(copyFileIntoKnowledgeBaseAtMock).toHaveBeenNthCalledWith(1, 'kb-1', '/Users/me/a/notes.md', 'notes.md')
+    expect(copyFileIntoKnowledgeBaseAtMock).toHaveBeenNthCalledWith(2, 'kb-1', '/Users/me/b/notes.md', 'notes_1.md')
   })
 
-  it('auto-renames a file whose processed markdown artifact would collide', async () => {
+  it('auto-renames a file whose processed-markdown name would collide', async () => {
     const service = new KnowledgeService()
     knowledgeBaseGetByIdMock.mockResolvedValue(createBase({ fileProcessorId: 'doc2x' }))
     knowledgeItemCreateMock
@@ -897,17 +889,11 @@ describe('KnowledgeService', () => {
       { type: 'file', data: { source: '/Users/me/b/brief.docx', path: '/Users/me/b/brief.docx' } }
     ])
 
-    // brief.pdf keeps its name (artifact brief.md); brief.docx is renamed to
-    // brief-1.docx so its derived artifact brief-1.md no longer collides.
-    expect(copyFileIntoKnowledgeBaseAtMock.mock.calls.map((call) => call[2])).toEqual(['brief.pdf', 'brief-1.docx'])
-    expect(knowledgeItemCreateMock).toHaveBeenNthCalledWith(
-      2,
-      'kb-1',
-      expect.objectContaining({
-        type: 'file',
-        data: { source: '/Users/me/b/brief.docx', relativePath: 'brief-1.docx' }
-      })
-    )
+    // brief.pdf reserves brief.pdf + its brief.md output; brief.docx would also emit
+    // brief.md, so it is bumped to brief_1.docx (whose brief_1.md sibling is free).
+    expect(knowledgeItemCreateMock).toHaveBeenCalledTimes(2)
+    expect(copyFileIntoKnowledgeBaseAtMock).toHaveBeenNthCalledWith(1, 'kb-1', '/Users/me/a/brief.pdf', 'brief.pdf')
+    expect(copyFileIntoKnowledgeBaseAtMock).toHaveBeenNthCalledWith(2, 'kb-1', '/Users/me/b/brief.docx', 'brief_1.docx')
   })
 
   it('passes the parent job when starting file processing during reindex', async () => {
@@ -928,8 +914,8 @@ describe('KnowledgeService', () => {
     expect(fileProcessingStartJobMock).toHaveBeenCalledWith(
       {
         feature: 'document_to_markdown',
-        file: { kind: 'path', path: '/mock/feature.knowledgebase.data/kb-1/source.pdf' },
-        output: { kind: 'path', path: '/mock/feature.knowledgebase.data/kb-1/source.md' },
+        file: { kind: 'path', path: '/mock/feature.knowledgebase.data/kb-1/raw/source.pdf' },
+        output: { kind: 'path', path: '/mock/feature.knowledgebase.data/kb-1/raw/source.md' },
         context: { dataId: 'file-1' },
         processorId: 'doc2x'
       },

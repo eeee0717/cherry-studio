@@ -4,6 +4,7 @@ import path from 'node:path'
 import { application } from '@application'
 import { loggerService } from '@logger'
 import { copy, ensureDir, remove, removeDir, write } from '@main/utils/file/fs'
+import { nextFreeKnowledgeRelativePath } from '@main/utils/knowledge'
 import type { FilePath } from '@shared/file/types'
 
 const logger = loggerService.withContext('Knowledge:PathStorage')
@@ -11,8 +12,23 @@ const logger = loggerService.withContext('Knowledge:PathStorage')
 const CHERRY_META_DIR = '.cherry'
 const VECTOR_STORE_FILE = 'index.sqlite'
 
+/**
+ * The single material root inside a base dir. All material bytes live flat under
+ * `{baseDir}/raw/`, a sibling of the `.cherry/` control dir (which holds the
+ * derived index). A `relativePath` is always relative to this root; byte
+ * resolution is `{baseDir}/raw/{relativePath}` (knowledge-technical-design.md §2).
+ * Materials are not sub-partitioned by import-action type — the directory layout
+ * is internal and type/origin is read from `knowledge_item`, never the path.
+ */
+const MATERIAL_ROOT_DIR = 'raw'
+
 export function getKnowledgeBaseDir(baseId: string): FilePath {
   return path.join(application.getPath('feature.knowledgebase.data'), baseId) as FilePath
+}
+
+/** The material root (`{baseDir}/raw`) under which every `relativePath` resolves. */
+export function getKnowledgeMaterialDir(baseId: string): FilePath {
+  return path.join(getKnowledgeBaseDir(baseId), MATERIAL_ROOT_DIR) as FilePath
 }
 
 export function getKnowledgeBaseMetaDir(baseId: string): FilePath {
@@ -32,7 +48,7 @@ export function getKnowledgeVectorStoreFilePathSync(baseId: string): FilePath {
 
 export function getKnowledgeBaseFilePath(baseId: string, relativePath: string): FilePath {
   assertSafeKnowledgeRelativePath(relativePath)
-  return path.join(getKnowledgeBaseDir(baseId), relativePath) as FilePath
+  return path.join(getKnowledgeMaterialDir(baseId), relativePath) as FilePath
 }
 
 export function getKnowledgeSourceRelativePath(sourcePath: string): string {
@@ -42,11 +58,11 @@ export function getKnowledgeSourceRelativePath(sourcePath: string): string {
 }
 
 export function toKnowledgeRelativePath(baseId: string, absolutePath: string): string {
-  const baseDir = getKnowledgeBaseDir(baseId)
-  const relativePath = path.relative(baseDir, absolutePath)
+  const materialDir = getKnowledgeMaterialDir(baseId)
+  const relativePath = path.relative(materialDir, absolutePath)
   assertSafeKnowledgeRelativePath(relativePath)
-  if (!isPathInsideBase(baseDir, absolutePath)) {
-    throw new Error(`Path is outside knowledge base '${baseId}': ${absolutePath}`)
+  if (!isPathInsideBase(materialDir, absolutePath)) {
+    throw new Error(`Path is outside knowledge base material root '${baseId}': ${absolutePath}`)
   }
   return normalizeRelativePath(relativePath)
 }
@@ -67,8 +83,8 @@ export function withRelativePathSuffix(name: string, suffix: number): string {
 /**
  * Make `name` unique within `used`, inserting a numeric suffix before the
  * extension on collision (`foo.pdf` → `foo-1.pdf` → `foo-2.pdf`). The chosen
- * name is added to `used`. Shared by the v1→v2 migrator and the add workflow so
- * both deduplicate uploaded file names the same way.
+ * name is added to `used`. Used by the URL-snapshot capture path (and its
+ * migrator equivalent) to keep snapshot file names collision-free.
  */
 export function dedupeKnowledgeRelativePath(name: string, used: Set<string>): string {
   let candidate = name
@@ -82,30 +98,30 @@ export function dedupeKnowledgeRelativePath(name: string, used: Set<string>): st
 }
 
 /**
- * Pick a collision-free relative path for an uploaded file, renaming with a
- * numeric suffix until neither the file path nor — when `withProcessedArtifact`
- * is set — its derived `<name>.md` processing artifact is already reserved. The
- * source name and the artifact are renamed together because a processor always
- * writes the artifact next to its source stem (`brief.docx` → `brief.md`), so
- * the artifact cannot be renamed independently. Reserves the chosen path (and
- * artifact) in `reserved` and returns the file's relative path.
+ * Reserve a free relative path for an imported source file (auto-renaming on collision via
+ * a `_N` suffix) and return it. When `reserveProcessedArtifact`, the prospective
+ * processed-markdown sibling must also be free at the chosen suffix, and both are reserved
+ * together — so a processor later emitting `paper.md` can never disagree with the source.
+ * Mutates `reservedPaths`. File imports (upload + the v1→v2 migrator's copied files) reserve
+ * names through it.
  */
-export function reserveUploadedFileRelativePath(
-  reserved: Set<string>,
-  fileName: string,
-  withProcessedArtifact: boolean
+export function reserveImportedFileRelativePath(
+  sourceRelativePath: string,
+  reserveProcessedArtifact: boolean,
+  reservedPaths: Set<string>
 ): string {
-  for (let suffix = 0; ; suffix += 1) {
-    const candidate = suffix === 0 ? fileName : withRelativePathSuffix(fileName, suffix)
-    const artifact = withProcessedArtifact ? getProcessedMarkdownRelativePath(candidate) : null
-    if (!reserved.has(candidate) && !(artifact !== null && reserved.has(artifact))) {
-      reserved.add(candidate)
-      if (artifact !== null) {
-        reserved.add(artifact)
-      }
-      return candidate
+  const chosen = nextFreeKnowledgeRelativePath(sourceRelativePath, (candidate) => {
+    if (reservedPaths.has(candidate)) {
+      return false
     }
+    return !reserveProcessedArtifact || !reservedPaths.has(getProcessedMarkdownRelativePath(candidate))
+  })
+
+  reservedPaths.add(chosen)
+  if (reserveProcessedArtifact) {
+    reservedPaths.add(getProcessedMarkdownRelativePath(chosen))
   }
+  return chosen
 }
 
 export async function copyFileIntoKnowledgeBaseAt(

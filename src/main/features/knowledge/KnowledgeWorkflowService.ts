@@ -30,11 +30,12 @@ import { planKnowledgeItemSource } from './utils/sources/sourcePlanning'
 import {
   assertKnowledgeFileTargetAvailable,
   copyFileIntoKnowledgeBaseAt,
+  dedupeKnowledgeRelativePath,
   deleteKnowledgeItemFilesBestEffort,
   getKnowledgeBaseFilePath,
   getKnowledgeSourceRelativePath,
   getProcessedMarkdownRelativePath,
-  reserveUploadedFileRelativePath
+  reserveImportedFileRelativePath
 } from './utils/storage/pathStorage'
 
 const logger = loggerService.withContext('Knowledge:WorkflowService')
@@ -309,7 +310,7 @@ export class KnowledgeWorkflowService {
       // collision-free name and pin the item to it, so the first index reads the
       // snapshot offline (see ensureUrlSnapshot) instead of re-fetching the page.
       const snapshotName = getKnowledgeSourceRelativePath(input.data.snapshotPath)
-      const relativePath = reserveUploadedFileRelativePath(reservedPaths, snapshotName, false)
+      const relativePath = dedupeKnowledgeRelativePath(snapshotName, reservedPaths)
       await copyFileIntoKnowledgeBaseAt(baseId, input.data.snapshotPath, relativePath)
       return {
         groupId: input.groupId,
@@ -327,7 +328,7 @@ export class KnowledgeWorkflowService {
     // the destination base has no processor configured, so the copied `.md` cannot collide.
     const reserveArtifact =
       needsProcessedArtifactReservation(fileProcessorId, fileName) || Boolean(input.data.indexedPath)
-    const relativePath = reserveUploadedFileRelativePath(reservedPaths, fileName, reserveArtifact)
+    const relativePath = reserveImportedFileRelativePath(fileName, reserveArtifact, reservedPaths)
     await copyFileIntoKnowledgeBaseAt(baseId, input.data.path, relativePath)
 
     if (input.data.indexedPath) {

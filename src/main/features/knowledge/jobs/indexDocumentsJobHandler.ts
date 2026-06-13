@@ -13,12 +13,7 @@ import { knowledgeQueueName, reportKnowledgeProgress, toKnowledgeBaseId } from '
 import type { IndexableKnowledgeItem } from '../types/items'
 import { type ChunkedKnowledgeContent, chunkKnowledgeDocuments } from '../utils/indexing/chunk'
 import { embedKnowledgeTexts } from '../utils/indexing/embed'
-import {
-  toContentTextFormat,
-  toMaterialFileExt,
-  toMaterialOrigin,
-  toMaterialRelativePath
-} from '../utils/indexing/materialFields'
+import { toMaterialRelativePath } from '../utils/indexing/materialFields'
 import { isIndexableKnowledgeItem } from '../utils/items'
 import { fetchKnowledgeWebPage } from '../utils/sources/url'
 import { captureUrlSnapshotFile } from '../utils/sources/urlSnapshot'
@@ -223,20 +218,10 @@ async function buildRebuildMaterialInput(
 
   return {
     material: {
-      relativePath: toMaterialRelativePath(item),
-      origin: toMaterialOrigin(item),
-      indexPolicy: 'index',
-      fileExt: toMaterialFileExt(item)
-      // title / mimeType / sizeBytes / mtimeMs are deliberately left unset here.
-      // A knowledge_item has no display name, and the rest need an extra fs.stat +
-      // content-type sniff — and nothing consumes any of them yet (provenance
-      // display is v2.x). The material scanner backfills them when it lands. See
-      // knowledge-technical-design.md §4.2.
+      relativePath: toMaterialRelativePath(item)
     },
     content: {
-      text: chunked.contentText,
-      textFormat: toContentTextFormat(item),
-      normalizationVersion: 1
+      text: chunked.contentText
     },
     units: chunked.chunks.map((chunk) => ({
       unitType: 'chunk',

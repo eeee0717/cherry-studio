@@ -8,9 +8,6 @@ import { loggerService } from '@logger'
 import { DOCUMENT_SEPARATOR } from '@main/features/knowledge/utils/indexing/chunk'
 import {
   type MaterialFieldSource,
-  toContentTextFormat,
-  toMaterialFileExt,
-  toMaterialOrigin,
   toMaterialRelativePath
 } from '@main/features/knowledge/utils/indexing/materialFields'
 import {
@@ -22,8 +19,8 @@ import {
   collectKnowledgeReservedRelativePaths,
   dedupeKnowledgeRelativePath
 } from '@main/features/knowledge/utils/storage/pathStorage'
-import { hashChunkerConfig, hashEmbeddingText } from '@main/features/knowledge/vectorstore/indexStore/hashing'
-import { ensureIndexMeta, NORMALIZATION_VERSION } from '@main/features/knowledge/vectorstore/indexStore/indexMeta'
+import { hashEmbeddingText } from '@main/features/knowledge/vectorstore/indexStore/hashing'
+import { ensureIndexMeta } from '@main/features/knowledge/vectorstore/indexStore/indexMeta'
 import { KnowledgeIndexStore } from '@main/features/knowledge/vectorstore/indexStore/KnowledgeIndexStore'
 import { openLibsqlIndexDriver } from '@main/features/knowledge/vectorstore/indexStore/LibsqlDriver'
 import { libsqlVectorIndex } from '@main/features/knowledge/vectorstore/indexStore/LibsqlVectorIndex'
@@ -114,9 +111,6 @@ interface PreparedBasePlan {
   baseId: string
   baseDirPath: string
   targetDbPath: string
-  dimensions: number
-  embeddingModelId: string
-  chunkerConfigHash: string
   materials: PreparedMaterial[]
   urlSnapshots: PlannedUrlSnapshot[]
   expectedUnitCount: number
@@ -173,15 +167,10 @@ function buildMigratedRebuildInput(item: MaterialFieldSource, chunks: MigratedCh
 
   const input: RebuildMaterialInput = {
     material: {
-      relativePath: toMaterialRelativePath(item),
-      origin: toMaterialOrigin(item),
-      indexPolicy: 'index',
-      fileExt: toMaterialFileExt(item)
+      relativePath: toMaterialRelativePath(item)
     },
     content: {
-      text: parts.join(DOCUMENT_SEPARATOR),
-      textFormat: toContentTextFormat(item),
-      normalizationVersion: NORMALIZATION_VERSION
+      text: parts.join(DOCUMENT_SEPARATOR)
     },
     units,
     embeddings: [...embeddingByHash.entries()].map(([embeddingTextHash, vector]) => ({ embeddingTextHash, vector }))
@@ -346,7 +335,6 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
         }
 
         // Capture before the awaits below: TS resets property narrowing across await.
-        const embeddingModelId = base.embeddingModelId
         const dimensions = base.dimensions
         if (typeof dimensions !== 'number' || !Number.isInteger(dimensions) || dimensions <= 0) {
           const warningMessage = `Skipped knowledge vector base ${base.id}: invalid dimensions`
@@ -509,9 +497,6 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
           baseId: base.id,
           baseDirPath: path.join(ctx.paths.knowledgeBaseDir, base.id),
           targetDbPath: this.getRuntimeVectorStorePath(ctx.paths.knowledgeBaseDir, base.id),
-          dimensions,
-          embeddingModelId,
-          chunkerConfigHash: hashChunkerConfig(base.chunkSize, base.chunkOverlap),
           materials,
           urlSnapshots,
           expectedUnitCount,
@@ -564,12 +549,7 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
         const driver = await openLibsqlIndexDriver(tempPath)
         try {
           await createKnowledgeIndexSchema(driver)
-          await ensureIndexMeta(driver, {
-            baseId: plan.baseId,
-            embeddingModelId: plan.embeddingModelId,
-            dimensions: plan.dimensions,
-            chunkerConfigHash: plan.chunkerConfigHash
-          })
+          await ensureIndexMeta(driver, { baseId: plan.baseId })
           const store = new KnowledgeIndexStore(driver, libsqlVectorIndex)
 
           for (const material of plan.materials) {

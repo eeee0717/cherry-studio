@@ -133,15 +133,13 @@ async function createLegacyVectorDb(
 async function readStore(baseId: string) {
   const client = createClient({ url: pathToFileURL(runtimeVectorStorePath(baseId)).toString() })
   try {
-    const meta = (
-      await client.execute('SELECT base_id, dimensions_snapshot, embedding_model_id_snapshot FROM index_meta')
-    ).rows
+    const meta = (await client.execute('SELECT base_id FROM meta')).rows
     const material = (
       await client.execute(
-        'SELECT material_id, relative_path, origin, index_policy, file_ext, current_content_hash FROM material ORDER BY relative_path'
+        'SELECT material_id, relative_path, current_content_hash FROM material ORDER BY relative_path'
       )
     ).rows
-    const content = (await client.execute('SELECT content_hash, text, text_format FROM content')).rows
+    const content = (await client.execute('SELECT content_hash, text FROM content')).rows
     const searchUnit = (
       await client.execute(
         'SELECT unit_id, material_id, unit_type, unit_index, char_start, char_end FROM search_unit ORDER BY material_id, unit_index'
@@ -554,9 +552,7 @@ describe('KnowledgeVectorMigrator', () => {
       // from the content's first line), replacing the old virtual item-id path.
       const material = migrator.preparedBasePlans[0].materials[0].input.material
       expect(material).toMatchObject({
-        relativePath: 'sitemap page chunk.md',
-        origin: 'captured',
-        fileExt: undefined
+        relativePath: 'sitemap page chunk.md'
       })
       expect(migrator.preparedBasePlans[0].urlSnapshots).toHaveLength(1)
       expect(migrator.skippedCount).toBe(0)
@@ -819,27 +815,22 @@ describe('KnowledgeVectorMigrator', () => {
 
       const store = await readStore(MIGRATED_KNOWLEDGE_BASE_ID)
 
-      // index_meta identity is stamped for the migrated base.
+      // meta identity is stamped for the migrated base.
       expect(store.meta).toHaveLength(1)
       expect(store.meta[0]).toMatchObject({
-        base_id: MIGRATED_KNOWLEDGE_BASE_ID,
-        dimensions_snapshot: 2,
-        embedding_model_id_snapshot: 'ollama::nomic-embed-text'
+        base_id: MIGRATED_KNOWLEDGE_BASE_ID
       })
 
       // material: stable identity + provenance from the migrated item data.
       expect(store.material).toHaveLength(1)
       expect(store.material[0]).toMatchObject({
         material_id: MIGRATED_FILE_ITEM_ID,
-        relative_path: `${MIGRATED_FILE_ITEM_ID}.md`,
-        origin: 'user',
-        index_policy: 'index',
-        file_ext: '.md'
+        relative_path: `${MIGRATED_FILE_ITEM_ID}.md`
       })
 
-      // content: a .md material is markdown, and the unit offsets slice back to the body.
+      // content: the unit offsets slice back to the body.
       expect(store.content).toHaveLength(1)
-      expect(store.content[0]).toMatchObject({ text: 'file chunk', text_format: 'markdown' })
+      expect(store.content[0]).toMatchObject({ text: 'file chunk' })
       const unit = store.searchUnit[0]
       expect(unit).toMatchObject({ unit_index: 0, char_start: 0, char_end: 'file chunk'.length })
       expect(String(store.content[0].text).slice(Number(unit.char_start), Number(unit.char_end))).toBe('file chunk')
@@ -971,8 +962,8 @@ describe('KnowledgeVectorMigrator', () => {
       const material = (itemId: string, text: string, vector: number[]) => ({
         itemId,
         input: {
-          material: { relativePath: itemId, origin: 'captured', indexPolicy: 'index' },
-          content: { text, textFormat: 'markdown', normalizationVersion: 1 },
+          material: { relativePath: itemId },
+          content: { text },
           units: [{ unitType: 'chunk', unitIndex: 0, charStart: 0, charEnd: text.length }],
           embeddings: [{ embeddingTextHash: hashEmbeddingText(text), vector }]
         }
@@ -1025,8 +1016,8 @@ describe('KnowledgeVectorMigrator', () => {
             {
               itemId: 'item-0',
               input: {
-                material: { relativePath: 'item-0', origin: 'captured', indexPolicy: 'index' },
-                content: { text: 'doc', textFormat: 'markdown', normalizationVersion: 1 },
+                material: { relativePath: 'item-0' },
+                content: { text: 'doc' },
                 units: [{ unitType: 'chunk', unitIndex: 0, charStart: 0, charEnd: 3 }],
                 embeddings: [{ embeddingTextHash: hashEmbeddingText('doc'), vector: [1, 2] }]
               }
@@ -1202,8 +1193,7 @@ describe('KnowledgeVectorMigrator', () => {
       // The material row uses the real snapshot path, not the virtual item id.
       expect(store.material[0]).toMatchObject({
         material_id: MIGRATED_SITEMAP_URL_ITEM_ID,
-        relative_path: 'LLM Guide.md',
-        origin: 'captured'
+        relative_path: 'LLM Guide.md'
       })
 
       // The item row is pinned so the first reindex reads the snapshot offline.

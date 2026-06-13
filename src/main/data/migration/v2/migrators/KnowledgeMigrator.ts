@@ -9,9 +9,9 @@ import { knowledgeBaseTable, knowledgeItemTable } from '@data/db/schemas/knowled
 import { userModelTable } from '@data/db/schemas/userModel'
 import { createClient, type Value as LibsqlValue } from '@libsql/client'
 import { loggerService } from '@logger'
-import { dedupeKnowledgeRelativePath } from '@main/features/knowledge/utils/storage/pathStorage'
 import { sanitizeFilename } from '@main/utils/file'
 import { copy, ensureDir } from '@main/utils/file/fs'
+import { nextFreeKnowledgeRelativePath } from '@main/utils/knowledge'
 import type { ExecuteResult, PrepareResult, ValidateResult, ValidationError } from '@shared/data/migration/v2/types'
 import type { FileMetadata } from '@shared/data/types/file/legacyFileMetadata'
 import { KNOWLEDGE_BASE_ERROR_MISSING_EMBEDDING_MODEL } from '@shared/data/types/knowledge'
@@ -709,11 +709,11 @@ export class KnowledgeMigrator extends BaseMigrator {
   }
 
   /**
-   * Copy each migrated `file` item's upload into the v2 knowledge base directory
-   * and finalize its `relativePath` (deduped within the base) so the item behaves
-   * like a native v2 item — reindex/restore re-read the file from
-   * `<knowledgeBaseDir>/<baseId>/<relativePath>`. Mutates `items` in place before
-   * insertion so the persisted row matches what is on disk.
+   * Copy each migrated `file` item's upload into the v2 knowledge base material
+   * root and finalize its `relativePath` (deduped within the base) so the item
+   * behaves like a native v2 item — reindex/restore re-read the file from
+   * `<knowledgeBaseDir>/<baseId>/raw/<relativePath>` (§2). Mutates `items` in place
+   * before insertion so the persisted row matches what is on disk.
    *
    * The physical source is located by v1 storage name (`<filesDataDir>/<name>`),
    * never the stale `path` column (#15733). A missing or unreadable source
@@ -733,7 +733,11 @@ export class KnowledgeMigrator extends BaseMigrator {
       }
 
       const data = item.data as { relativePath: string }
-      const relativePath = dedupeKnowledgeRelativePath(data.relativePath, usedRelativePaths)
+      const relativePath = nextFreeKnowledgeRelativePath(
+        data.relativePath,
+        (candidate) => !usedRelativePaths.has(candidate)
+      )
+      usedRelativePaths.add(relativePath)
       data.relativePath = relativePath
 
       const storageName = this.fileStorageNameByItemId.get(item.id)
@@ -750,7 +754,7 @@ export class KnowledgeMigrator extends BaseMigrator {
         continue
       }
 
-      const destPath = path.join(ctx.paths.knowledgeBaseDir, baseId, relativePath)
+      const destPath = path.join(ctx.paths.knowledgeBaseDir, baseId, 'raw', relativePath)
       try {
         await ensureDir(path.dirname(destPath) as FilePath)
         await copy(sourcePath as FilePath, destPath as FilePath)

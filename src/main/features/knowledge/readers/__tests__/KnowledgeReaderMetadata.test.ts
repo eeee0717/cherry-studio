@@ -72,7 +72,7 @@ describe('knowledge reader metadata', () => {
       updatedAt: '2026-04-08T00:00:00.000Z'
     })
 
-    expect(loadDataMock).toHaveBeenCalledWith('/mock/feature.knowledgebase.data/kb-1/original.txt')
+    expect(loadDataMock).toHaveBeenCalledWith('/mock/feature.knowledgebase.data/kb-1/raw/original.txt')
     expect(documents[0]?.metadata).toEqual({
       source: '/tmp/original.txt'
     })
@@ -95,7 +95,7 @@ describe('knowledge reader metadata', () => {
       updatedAt: '2026-04-08T00:00:00.000Z'
     })
 
-    expect(readFileMock).toHaveBeenCalledWith('/mock/feature.knowledgebase.data/kb-1/example.md')
+    expect(readFileMock).toHaveBeenCalledWith('/mock/feature.knowledgebase.data/kb-1/raw/example.md')
     expect(documents).toHaveLength(1)
     expect(documents[0]?.text).toBe('# Page\n\nbody [kept](https://example.com/link)\n')
     expect(documents[0]?.metadata).toEqual({
