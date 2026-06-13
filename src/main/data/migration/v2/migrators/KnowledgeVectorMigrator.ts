@@ -40,12 +40,15 @@ import { KNOWLEDGE_BASE_ID_REMAP_SHARED_DATA_KEY, KNOWLEDGE_ITEM_ID_REMAP_SHARED
 
 const logger = loggerService.withContext('KnowledgeVectorMigrator')
 
-// Runtime vector store layout — source of truth:
-// src/main/features/knowledge/utils/storage/pathStorage.ts (CHERRY_META_DIR / VECTOR_STORE_FILE).
-// Runtime opens {knowledgeBaseDir}/{baseId}/.cherry/index.sqlite by the migrated (new) base id,
-// so the migrator must write the rebuilt store to that same nested path.
+// Runtime vector store + material layout — source of truth:
+// src/main/features/knowledge/utils/storage/pathStorage.ts
+// (CHERRY_META_DIR / VECTOR_STORE_FILE / MATERIAL_ROOT_DIR). Runtime opens
+// {knowledgeBaseDir}/{baseId}/.cherry/index.sqlite by the migrated (new) base id, and resolves
+// every material's bytes at {knowledgeBaseDir}/{baseId}/raw/{relativePath}, so the migrator must
+// write the rebuilt store and any materialized url snapshot to those same nested paths.
 const KNOWLEDGE_META_DIR = '.cherry'
 const KNOWLEDGE_VECTOR_STORE_FILE = 'index.sqlite'
+const KNOWLEDGE_MATERIAL_ROOT_DIR = 'raw'
 const INDEXABLE_KNOWLEDGE_ITEM_TYPES = new Set<KnowledgeItemType>(['file', 'url', 'note'])
 const SKIP_WARNING_SAMPLE_LIMIT = 3
 // fs.rm options that survive a transient Windows lock (libsql handle / AV / indexer)
@@ -93,10 +96,10 @@ interface PreparedMaterial {
 }
 
 /**
- * A url snapshot file to materialize next to the rebuilt store, so migrated
- * urls are real base files from day one (knowledge_item exit path,
- * knowledge-technical-design.md §7) — reindex then reads them offline instead
- * of re-fetching, and the material row drops the virtual item-id path.
+ * A url snapshot file to materialize under the base's `raw/` material root, so
+ * migrated urls are real base files from day one — reindex then reads them
+ * offline instead of re-fetching, and the material row drops the virtual item-id
+ * path for the real snapshot path.
  */
 interface PlannedUrlSnapshot {
   itemId: string
@@ -109,7 +112,7 @@ interface PlannedUrlSnapshot {
 
 interface PreparedBasePlan {
   baseId: string
-  baseDirPath: string
+  materialDirPath: string
   targetDbPath: string
   materials: PreparedMaterial[]
   urlSnapshots: PlannedUrlSnapshot[]
@@ -496,7 +499,7 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
         // could be associated with valid, indexable migrated knowledge_item rows.
         this.preparedBasePlans.push({
           baseId: base.id,
-          baseDirPath: path.join(ctx.paths.knowledgeBaseDir, base.id),
+          materialDirPath: path.join(ctx.paths.knowledgeBaseDir, base.id, KNOWLEDGE_MATERIAL_ROOT_DIR),
           targetDbPath: this.getRuntimeVectorStorePath(ctx.paths.knowledgeBaseDir, base.id),
           materials,
           urlSnapshots,
@@ -545,7 +548,7 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
         await this.removeIndexStoreFiles(tempPath)
 
         // Rebuild into a temp store through the exact runtime open sequence
-        // (driver → schema → index_meta → KnowledgeIndexStore.rebuildMaterial), so the
+        // (driver → schema → ensureIndexMeta → KnowledgeIndexStore.rebuildMaterial), so the
         // migrated store is byte-for-byte a store the runtime would produce.
         const driver = await openLibsqlIndexDriver(tempPath)
         try {
@@ -586,11 +589,20 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
         await this.removeIndexStoreFiles(plan.targetDbPath)
         await fs.promises.rename(tempPath, plan.targetDbPath)
 
-        // Materialize each migrated url's snapshot file (overwriting a previous
-        // partial run's copy) and pin the item row to it, so the runtime's
-        // ensure-snapshot step reads it offline instead of re-fetching the page.
+        // Materialize each migrated url's snapshot file under the base's `raw/`
+        // material root (overwriting a previous partial run's copy) and pin the item
+        // row to it, so the runtime's ensure-snapshot step reads it offline at
+        // {baseDir}/raw/{relativePath} instead of re-fetching the page. The material
+        // root may not exist yet (a url-only base copies no files), so ensure it first.
+        if (plan.urlSnapshots.length > 0) {
+          await fs.promises.mkdir(plan.materialDirPath, { recursive: true })
+        }
         for (const snapshot of plan.urlSnapshots) {
-          await fs.promises.writeFile(path.join(plan.baseDirPath, snapshot.relativePath), snapshot.fileText, 'utf-8')
+          await fs.promises.writeFile(
+            path.join(plan.materialDirPath, snapshot.relativePath),
+            snapshot.fileText,
+            'utf-8'
+          )
           await ctx.db
             .update(knowledgeItemTable)
             .set({ data: snapshot.data })
@@ -658,7 +670,7 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
         // The rebuilt store's url material rows reference these snapshot paths,
         // so a missing file would surface later as an unreadable material.
         const missingSnapshots = plan.urlSnapshots.filter(
-          (snapshot) => !fs.existsSync(path.join(plan.baseDirPath, snapshot.relativePath))
+          (snapshot) => !fs.existsSync(path.join(plan.materialDirPath, snapshot.relativePath))
         )
         if (missingSnapshots.length > 0) {
           errors.push({

@@ -77,6 +77,13 @@ function runtimeVectorStorePath(baseId: string): string {
   return path.join(currentKnowledgeBaseRoot, baseId, '.cherry', 'index.sqlite')
 }
 
+// Mirrors the runtime material-byte layout in pathStorage.ts (MATERIAL_ROOT_DIR='raw'):
+// {root}/{baseId}/raw/{relativePath}. Snapshot assertions resolve through this so a migrator that
+// writes outside `raw/` (where getKnowledgeBaseFilePath would never read it) fails the test.
+function runtimeMaterialPath(baseId: string, relativePath: string): string {
+  return path.join(currentKnowledgeBaseRoot, baseId, 'raw', relativePath)
+}
+
 interface MigratedKnowledgeBaseRow {
   id: string
   dimensions: number
@@ -972,7 +979,7 @@ describe('KnowledgeVectorMigrator', () => {
       migrator.preparedBasePlans = [
         {
           baseId: 'progress',
-          baseDirPath: path.join(knowledgeBaseDir, 'progress'),
+          materialDirPath: path.join(knowledgeBaseDir, 'progress', 'raw'),
           targetDbPath: dbPath,
           dimensions: 2,
           embeddingModelId: 'ollama::nomic-embed-text',
@@ -1007,7 +1014,7 @@ describe('KnowledgeVectorMigrator', () => {
       migrator.preparedBasePlans = [
         {
           baseId: 'ebusy',
-          baseDirPath: path.join(knowledgeBaseDir, 'ebusy'),
+          materialDirPath: path.join(knowledgeBaseDir, 'ebusy', 'raw'),
           targetDbPath: dbPath,
           dimensions: 2,
           embeddingModelId: 'ollama::nomic-embed-text',
@@ -1179,7 +1186,7 @@ describe('KnowledgeVectorMigrator', () => {
       // The snapshot lands in the base under a heading-derived name, stamped with
       // provenance frontmatter that strips back off to exactly the stored content
       // text — the hash round-trip that lets reindex reuse the migrated vectors.
-      const snapshotPath = path.join(knowledgeBaseDir, MIGRATED_KNOWLEDGE_BASE_ID, 'LLM Guide.md')
+      const snapshotPath = runtimeMaterialPath(MIGRATED_KNOWLEDGE_BASE_ID, 'LLM Guide.md')
       expect(fs.existsSync(snapshotPath)).toBe(true)
       const fileText = fs.readFileSync(snapshotPath, 'utf-8')
       expect(fileText).toMatch(/^---\ncherry:\n {2}type: url-snapshot\n {2}source: "https:\/\/example\.com\/guide"\n/)
@@ -1209,6 +1216,56 @@ describe('KnowledgeVectorMigrator', () => {
       const validateResult = await migrator.validate(migrationCtx as any)
       expect(validateResult.success).toBe(true)
       expect(validateResult.errors).toStrictEqual([])
+    })
+
+    it('validate fails when a materialized url snapshot file is missing from the material root', async () => {
+      await createLegacyVectorDb(path.join(knowledgeBaseDir, LEGACY_KNOWLEDGE_BASE_ID), [
+        {
+          id: 'legacy-url-0',
+          pageContent: '# LLM Guide',
+          uniqueLoaderId: 'loader-url-a',
+          source: 'https://example.com/guide',
+          vector: [1, 2]
+        }
+      ])
+
+      const migrationCtx = createMigrationCtx({
+        migratedBases: [createMigratedBase()],
+        migratedItems: [
+          createMigratedItem(MIGRATED_SITEMAP_URL_ITEM_ID, {
+            type: 'url',
+            data: { source: 'https://example.com/guide', url: 'https://example.com/guide' }
+          })
+        ],
+        reduxData: {
+          knowledge: {
+            bases: [
+              {
+                id: LEGACY_KNOWLEDGE_BASE_ID,
+                name: 'Base 1',
+                items: [{ id: 'item-sitemap', type: 'sitemap', uniqueIds: ['loader-url-a'] }]
+              }
+            ]
+          }
+        }
+      })
+
+      const migrator = new KnowledgeVectorMigrator() as any
+      expect((await migrator.prepare(migrationCtx as any)).success).toBe(true)
+      expect((await migrator.execute(migrationCtx as any)).success).toBe(true)
+
+      // Remove the snapshot from the real runtime material root. validate must read the
+      // same `raw/` path the runtime does, so it should surface this as a missing snapshot —
+      // if it checked any other path the deletion would go unnoticed.
+      const snapshotPath = runtimeMaterialPath(MIGRATED_KNOWLEDGE_BASE_ID, 'LLM Guide.md')
+      expect(fs.existsSync(snapshotPath)).toBe(true)
+      fs.rmSync(snapshotPath)
+
+      const validateResult = await migrator.validate(migrationCtx as any)
+      expect(validateResult.success).toBe(false)
+      expect(validateResult.errors).toContainEqual(
+        expect.objectContaining({ key: `knowledge_vector_url_snapshots_${MIGRATED_KNOWLEDGE_BASE_ID}` })
+      )
     })
 
     it('dedupes the snapshot name around paths other items already occupy', async () => {
@@ -1250,7 +1307,7 @@ describe('KnowledgeVectorMigrator', () => {
       expect((await migrator.prepare(migrationCtx as any)).success).toBe(true)
       expect((await migrator.execute(migrationCtx as any)).success).toBe(true)
 
-      expect(fs.existsSync(path.join(knowledgeBaseDir, MIGRATED_KNOWLEDGE_BASE_ID, 'LLM Guide_1.md'))).toBe(true)
+      expect(fs.existsSync(runtimeMaterialPath(MIGRATED_KNOWLEDGE_BASE_ID, 'LLM Guide_1.md'))).toBe(true)
       const store = await readStore(MIGRATED_KNOWLEDGE_BASE_ID)
       expect(store.material[0]).toMatchObject({ relative_path: 'LLM Guide_1.md' })
     })
@@ -1291,8 +1348,8 @@ describe('KnowledgeVectorMigrator', () => {
       expect((await migrator.prepare(migrationCtx as any)).success).toBe(true)
       expect((await migrator.execute(migrationCtx as any)).success).toBe(true)
 
-      expect(fs.existsSync(path.join(knowledgeBaseDir, MIGRATED_KNOWLEDGE_BASE_ID, 'Pinned.md'))).toBe(true)
-      expect(fs.existsSync(path.join(knowledgeBaseDir, MIGRATED_KNOWLEDGE_BASE_ID, 'Pinned_1.md'))).toBe(false)
+      expect(fs.existsSync(runtimeMaterialPath(MIGRATED_KNOWLEDGE_BASE_ID, 'Pinned.md'))).toBe(true)
+      expect(fs.existsSync(runtimeMaterialPath(MIGRATED_KNOWLEDGE_BASE_ID, 'Pinned_1.md'))).toBe(false)
       const store = await readStore(MIGRATED_KNOWLEDGE_BASE_ID)
       expect(store.material[0]).toMatchObject({ relative_path: 'Pinned.md' })
       expect(migrationCtx.db.updateCalls[0].values).toEqual({

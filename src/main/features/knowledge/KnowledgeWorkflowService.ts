@@ -360,6 +360,17 @@ export class KnowledgeWorkflowService {
     const items = await knowledgeItemService.getItemsByBaseId(baseId)
 
     for (const item of items) {
+      if (item.type === 'url') {
+        // URL snapshots live as base files under `raw/` too; reserve any already-captured
+        // snapshot path so a restored snapshot with a colliding name auto-renames to `_N`
+        // instead of hard-failing the on-disk copy (mirrors collectKnowledgeReservedRelativePaths,
+        // the all-type reserved set ensureUrlSnapshot uses on the index path).
+        if (item.data.relativePath) {
+          reservedPaths.add(item.data.relativePath)
+        }
+        continue
+      }
+
       if (item.type !== 'file') {
         continue
       }

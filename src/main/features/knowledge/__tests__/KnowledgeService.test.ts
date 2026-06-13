@@ -896,6 +896,46 @@ describe('KnowledgeService', () => {
     expect(copyFileIntoKnowledgeBaseAtMock).toHaveBeenNthCalledWith(2, 'kb-1', '/Users/me/b/brief.docx', 'brief_1.docx')
   })
 
+  it('auto-renames a restored url snapshot whose name collides with an existing url snapshot', async () => {
+    const service = new KnowledgeService()
+    knowledgeBaseGetByIdMock.mockResolvedValue(createBase({ fileProcessorId: null }))
+    // The base already holds a url whose captured snapshot occupies `example-page.md` under `raw/`.
+    knowledgeItemGetItemsByBaseIdMock.mockResolvedValue([
+      {
+        ...createNoteItem('existing-url', 'kb-1'),
+        type: 'url' as const,
+        data: { source: 'https://example.com/old', url: 'https://example.com/old', relativePath: 'example-page.md' }
+      }
+    ])
+
+    await service.addItems('kb-1', [
+      {
+        type: 'url',
+        data: {
+          source: 'https://example.com/new',
+          url: 'https://example.com/new',
+          snapshotPath: '/captured/example-page.md'
+        }
+      }
+    ])
+
+    // The restored snapshot's name collides with the existing url's reserved path, so it is
+    // deduped to `_N` instead of hard-failing the on-disk copy — the bug was that existing url
+    // snapshots were never added to the reserved set, so reservation could not see the collision.
+    expect(copyFileIntoKnowledgeBaseAtMock).toHaveBeenCalledWith(
+      'kb-1',
+      '/captured/example-page.md',
+      'example-page_1.md'
+    )
+    expect(knowledgeItemCreateMock).toHaveBeenCalledWith(
+      'kb-1',
+      expect.objectContaining({
+        type: 'url',
+        data: { source: 'https://example.com/new', url: 'https://example.com/new', relativePath: 'example-page_1.md' }
+      })
+    )
+  })
+
   it('passes the parent job when starting file processing during reindex', async () => {
     const service = new KnowledgeService()
     const processingFile = createFileItem('file-1', 'kb-1', '/docs/source.pdf', 'processing')
