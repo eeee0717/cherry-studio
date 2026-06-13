@@ -30,21 +30,30 @@ describe('toMaterialRelativePath', () => {
     expect(toMaterialRelativePath(url)).toBe('example-page.md')
   })
 
-  it('falls back to the item id for a url that has not been captured yet', () => {
+  it('uses a note’s captured snapshot path once it has one (the real raw/ file, matching the migrator)', () => {
+    const note: MaterialFieldSource = {
+      id: 'note-1',
+      type: 'note',
+      data: { source: 'My note', content: 'hello', relativePath: 'My note.md' }
+    }
+    expect(toMaterialRelativePath(note)).toBe('My note.md')
+  })
+
+  it('throws for a url that has not been captured yet — a snapshot is always materialized first', () => {
     const url: MaterialFieldSource = {
       id: 'url-2',
       type: 'url',
       data: { source: 'https://example.com', url: 'https://example.com' }
     }
-    expect(toMaterialRelativePath(url)).toBe('url-2')
+    expect(() => toMaterialRelativePath(url)).toThrow('has no captured snapshot relativePath')
   })
 
-  it('uses the item id for a note, which has no base file', () => {
+  it('throws for a note that has not been captured yet — a snapshot is always materialized first', () => {
     const note: MaterialFieldSource = {
-      id: 'note-1',
+      id: 'note-2',
       type: 'note',
-      data: { source: 'note', content: 'hello' }
+      data: { source: 'My note', content: 'hello' }
     }
-    expect(toMaterialRelativePath(note)).toBe('note-1')
+    expect(() => toMaterialRelativePath(note)).toThrow('has no captured snapshot relativePath')
   })
 })

@@ -15,16 +15,17 @@ export type MaterialFieldSource =
 
 /**
  * A material's stable relative path. A file uses its stored path (the processed
- * artifact when present). A url uses its captured snapshot path once it has one —
- * the snapshot is a real base file under `raw/` — and only falls back to the item
- * id while no snapshot exists yet. A note has no base file, so it uses the item id.
+ * artifact when present). A url or note uses its captured snapshot path — a real
+ * base file under `raw/`, materialized before the material is stamped (the index
+ * job's ensure-snapshot step, or the vector migrator), so it is always present
+ * here; a missing one is an invariant violation, not a fallback case.
  */
 export function toMaterialRelativePath(item: MaterialFieldSource): string {
   if (item.type === 'file') {
     return item.data.indexedRelativePath ?? item.data.relativePath
   }
-  if (item.type === 'url') {
-    return item.data.relativePath ?? item.id
+  if (!item.data.relativePath) {
+    throw new Error(`Knowledge ${item.type} item ${item.id} has no captured snapshot relativePath for its material`)
   }
-  return item.id
+  return item.data.relativePath
 }

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { hashEmbeddingText } from '../../vectorstore/indexStore/hashing'
 import type { RebuildMaterialInput } from '../../vectorstore/indexStore/model'
 import {
+  captureNoteSnapshotFileMock,
   captureUrlSnapshotFileMock,
   createAbortedCtx,
   createCtx,
@@ -18,6 +19,7 @@ import {
   getJobMock,
   knowledgeBaseGetByIdMock,
   knowledgeItemGetByIdMock,
+  knowledgeItemUpdateNoteSnapshotRelativePathMock,
   knowledgeItemUpdateStatusMock,
   knowledgeItemUpdateUrlSnapshotRelativePathMock,
   knowledgeLockManager,
@@ -300,6 +302,60 @@ describe('index-documents job handler', () => {
 
     expect(captureUrlSnapshotFileMock).not.toHaveBeenCalled()
     expect(knowledgeItemUpdateStatusMock).not.toHaveBeenCalledWith('url-1', 'completed')
+  })
+
+  it('captures a note snapshot on first index, persists its relativePath, and reads it offline', async () => {
+    const handler = createIndexDocumentsJobHandler(knowledgeLockManager as never)
+    // A freshly added / migrated note has no snapshot yet (returned both at load
+    // time and at the in-lock re-read); its content is written to a base file.
+    const noSnapshotNote = { ...createNoteItem(NOTE_ITEM_ID), data: { source: 'My note', content: 'note body' } }
+    knowledgeItemGetByIdMock.mockResolvedValue(noSnapshotNote)
+    captureNoteSnapshotFileMock.mockResolvedValue('My note.md')
+
+    await handler.execute(createCtx({ baseId: 'kb-1', itemId: NOTE_ITEM_ID, parentJobId: null }))
+
+    // No network fetch; the in-hand content is written and the relativePath persisted.
+    expect(fetchKnowledgeWebPageMock).not.toHaveBeenCalled()
+    expect(captureNoteSnapshotFileMock).toHaveBeenCalledWith('kb-1', 'My note', 'note body', expect.any(Set))
+    expect(knowledgeItemUpdateNoteSnapshotRelativePathMock).toHaveBeenCalledWith(NOTE_ITEM_ID, 'My note.md')
+    // The reader receives the item carrying the freshly captured snapshot path.
+    expect(loadKnowledgeItemDocumentsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: NOTE_ITEM_ID, data: expect.objectContaining({ relativePath: 'My note.md' }) })
+    )
+    // The material's relative_path is the real snapshot path under `raw/`, not the
+    // item-id virtual placeholder — so it points at the bytes captureNoteSnapshotFile wrote.
+    expect(lastRebuildInput().material.relativePath).toBe('My note.md')
+  })
+
+  it('does not capture a note that already has a snapshot', async () => {
+    const handler = createIndexDocumentsJobHandler(knowledgeLockManager as never)
+    knowledgeItemGetByIdMock.mockResolvedValue(createNoteItem(NOTE_ITEM_ID, null, 'processing', 'cached-note.md'))
+
+    await handler.execute(createCtx({ baseId: 'kb-1', itemId: NOTE_ITEM_ID, parentJobId: null }))
+
+    expect(captureNoteSnapshotFileMock).not.toHaveBeenCalled()
+    expect(knowledgeItemUpdateNoteSnapshotRelativePathMock).not.toHaveBeenCalled()
+    expect(loadKnowledgeItemDocumentsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ relativePath: 'cached-note.md' }) })
+    )
+  })
+
+  it('skips the note snapshot write when another job captured it first', async () => {
+    const handler = createIndexDocumentsJobHandler(knowledgeLockManager as never)
+    // Load sees no snapshot; the in-lock re-read sees one a concurrent job wrote.
+    const noSnapshotNote = { ...createNoteItem(NOTE_ITEM_ID), data: { source: 'My note', content: 'note body' } }
+    knowledgeItemGetByIdMock
+      .mockResolvedValueOnce(noSnapshotNote)
+      .mockResolvedValueOnce(createNoteItem(NOTE_ITEM_ID, null, 'processing', 'raced-note.md'))
+
+    await handler.execute(createCtx({ baseId: 'kb-1', itemId: NOTE_ITEM_ID, parentJobId: null }))
+
+    expect(captureNoteSnapshotFileMock).not.toHaveBeenCalled()
+    expect(knowledgeItemUpdateNoteSnapshotRelativePathMock).not.toHaveBeenCalled()
+    expect(loadKnowledgeItemDocumentsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ relativePath: 'raced-note.md' }) })
+    )
+    expect(lastRebuildInput().material.relativePath).toBe('raced-note.md')
   })
 
   it('onSettled skips failed status when the item is deleting', async () => {

@@ -113,7 +113,7 @@ function createFileItem(ext: string, sourcePath?: string): KnowledgeItemOf<'file
   }
 }
 
-function createNoteItem(content: string, sourceUrl?: string): KnowledgeItemOf<'note'> {
+function createNoteItem(content: string, relativePath = 'note-1.md'): KnowledgeItemOf<'note'> {
   return {
     id: 'note-1',
     baseId: 'base-1',
@@ -124,9 +124,9 @@ function createNoteItem(content: string, sourceUrl?: string): KnowledgeItemOf<'n
     createdAt: '2026-04-03T00:00:00.000Z',
     updatedAt: '2026-04-03T00:00:00.000Z',
     data: {
-      source: sourceUrl ?? 'note-1',
+      source: 'My note',
       content,
-      sourceUrl
+      relativePath
     }
   }
 }
@@ -252,15 +252,17 @@ describe('loadKnowledgeItemDocuments', () => {
     })
   })
 
-  it('creates a note reader that returns a single Document', async () => {
-    const item = createNoteItem('hello world', 'https://example.com/note')
+  it('creates a note reader that returns a single Document from its snapshot', async () => {
+    readFileMock.mockResolvedValueOnce('hello world')
+    const item = createNoteItem('hello world', 'my-note.md')
     const docs = await loadKnowledgeItemDocuments(item)
 
+    expect(readFileMock).toHaveBeenCalledWith('/mock/feature.knowledgebase.data/base-1/raw/my-note.md')
     expect(docs).toHaveLength(1)
     expect(docs[0]).toMatchObject({
       text: 'hello world',
       metadata: {
-        source: 'https://example.com/note'
+        source: 'My note'
       }
     })
   })

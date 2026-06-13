@@ -561,7 +561,7 @@ describe('KnowledgeVectorMigrator', () => {
       expect(material).toMatchObject({
         relativePath: 'sitemap page chunk.md'
       })
-      expect(migrator.preparedBasePlans[0].urlSnapshots).toHaveLength(1)
+      expect(migrator.preparedBasePlans[0].materialSnapshots).toHaveLength(1)
       expect(migrator.skippedCount).toBe(0)
       expect(result.warnings ?? []).not.toEqual(
         expect.arrayContaining([expect.stringContaining('non_indexable_container')])
@@ -990,7 +990,7 @@ describe('KnowledgeVectorMigrator', () => {
             material('item-2', 'chunk two', [2, 3]),
             material('item-3', 'chunk three', [3, 4])
           ],
-          urlSnapshots: [],
+          materialSnapshots: [],
           expectedUnitCount: 4,
           expectedEmbeddingCount: 4,
           sourceRowCount: 4
@@ -1030,7 +1030,7 @@ describe('KnowledgeVectorMigrator', () => {
               }
             }
           ],
-          urlSnapshots: [],
+          materialSnapshots: [],
           expectedUnitCount: 1,
           expectedEmbeddingCount: 1,
           sourceRowCount: 1
@@ -1264,7 +1264,7 @@ describe('KnowledgeVectorMigrator', () => {
       const validateResult = await migrator.validate(migrationCtx as any)
       expect(validateResult.success).toBe(false)
       expect(validateResult.errors).toContainEqual(
-        expect.objectContaining({ key: `knowledge_vector_url_snapshots_${MIGRATED_KNOWLEDGE_BASE_ID}` })
+        expect.objectContaining({ key: `knowledge_vector_material_snapshots_${MIGRATED_KNOWLEDGE_BASE_ID}` })
       )
     })
 
@@ -1359,6 +1359,82 @@ describe('KnowledgeVectorMigrator', () => {
           relativePath: 'Pinned.md'
         }
       })
+    })
+
+    it('materializes a migrated note as a verbatim snapshot (no frontmatter) and pins the item row', async () => {
+      await createLegacyVectorDb(path.join(knowledgeBaseDir, LEGACY_KNOWLEDGE_BASE_ID), [
+        {
+          id: 'legacy-note-0',
+          pageContent: '# Meeting notes',
+          uniqueLoaderId: 'loader-note-a',
+          source: 'note',
+          vector: [1, 2]
+        },
+        {
+          id: 'legacy-note-1',
+          pageContent: 'second chunk',
+          uniqueLoaderId: 'loader-note-b',
+          source: 'note',
+          vector: [3, 4]
+        }
+      ])
+
+      const migrationCtx = createMigrationCtx({
+        migratedBases: [createMigratedBase()],
+        migratedItems: [
+          createMigratedItem(MIGRATED_SITEMAP_URL_ITEM_ID, {
+            type: 'note',
+            data: { source: 'Meeting notes', content: 'original note body' }
+          })
+        ],
+        reduxData: {
+          knowledge: {
+            bases: [
+              {
+                id: LEGACY_KNOWLEDGE_BASE_ID,
+                name: 'Base 1',
+                items: [{ id: 'item-sitemap', type: 'note', uniqueIds: ['loader-note-a', 'loader-note-b'] }]
+              }
+            ]
+          }
+        }
+      })
+
+      const migrator = new KnowledgeVectorMigrator() as any
+      expect((await migrator.prepare(migrationCtx as any)).success).toBe(true)
+      expect((await migrator.execute(migrationCtx as any)).success).toBe(true)
+
+      // The snapshot lands under a source-title-derived name, written verbatim — no
+      // cherry frontmatter — so its bytes equal the stored content text exactly (the
+      // hash round-trip that lets reindex reuse the migrated vectors).
+      const snapshotPath = runtimeMaterialPath(MIGRATED_KNOWLEDGE_BASE_ID, 'Meeting notes.md')
+      expect(fs.existsSync(snapshotPath)).toBe(true)
+      const fileText = fs.readFileSync(snapshotPath, 'utf-8')
+      expect(fileText).not.toMatch(/^---\ncherry:/)
+
+      const store = await readStore(MIGRATED_KNOWLEDGE_BASE_ID)
+      expect(store.content[0].text).toBe('# Meeting notes\n\nsecond chunk')
+      expect(fileText).toBe(store.content[0].text)
+
+      // The material row uses the real snapshot path, not the virtual item id.
+      expect(store.material[0]).toMatchObject({
+        material_id: MIGRATED_SITEMAP_URL_ITEM_ID,
+        relative_path: 'Meeting notes.md'
+      })
+
+      // The item row is pinned so the first reindex reads the snapshot offline.
+      expect(migrationCtx.db.updateCalls).toHaveLength(1)
+      expect(migrationCtx.db.updateCalls[0].values).toEqual({
+        data: {
+          source: 'Meeting notes',
+          content: 'original note body',
+          relativePath: 'Meeting notes.md'
+        }
+      })
+
+      const validateResult = await migrator.validate(migrationCtx as any)
+      expect(validateResult.success).toBe(true)
+      expect(validateResult.errors).toStrictEqual([])
     })
   })
 })

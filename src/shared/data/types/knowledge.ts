@@ -252,7 +252,15 @@ export const UrlItemDataSchema = KnowledgeItemSharedSchema.extend({
  */
 export const NoteItemDataSchema = KnowledgeItemSharedSchema.extend({
   content: z.string().max(KNOWLEDGE_NOTE_CONTENT_MAX).describe('Plain text note content to index.'),
-  sourceUrl: z.string().optional().describe('Optional external URL associated with the note.')
+  // Written lazily by main on first index, never by raw caller input (add omits
+  // it). Same base-relative, POSIX-normalized, no-traversal invariant as
+  // FileItemData.relativePath, enforced at the filesystem boundary.
+  relativePath: z
+    .string()
+    .trim()
+    .min(1)
+    .optional()
+    .describe('Knowledge-base-relative path for the captured note snapshot markdown, written on first index.')
 })
 
 /**
@@ -536,9 +544,10 @@ const CreateKnowledgeItemBaseSchema = z.strictObject({
 })
 
 // Members shared verbatim by the persisted-create and runtime-add unions. The
-// `file` and `url` members differ between the two (persisted base-relative paths
-// vs runtime absolute source paths), so they are declared separately below; the
-// remaining members are declared once and reused.
+// `file`, `url`, and `note` members differ between the two (persisted carries a
+// main-written base-relative path the add surface must not accept), so they are
+// declared separately below; the remaining `directory` member is declared once
+// and reused.
 const UrlItemMemberSchema = CreateKnowledgeItemBaseSchema.extend({
   type: z.literal('url'),
   data: UrlItemDataSchema
@@ -589,13 +598,25 @@ const RuntimeUrlItemMemberSchema = CreateKnowledgeItemBaseSchema.extend({
   data: RuntimeUrlItemDataSchema
 })
 
+// Runtime note add carries only the caller-supplied content; `relativePath` is
+// written lazily by main on first index (see ensureNoteSnapshot), never by raw
+// caller input, so it is omitted from the add surface.
+const RuntimeNoteItemDataSchema = KnowledgeItemSharedSchema.extend({
+  content: z.string().max(KNOWLEDGE_NOTE_CONTENT_MAX).describe('Plain text note content to index.')
+})
+
+const RuntimeNoteItemMemberSchema = CreateKnowledgeItemBaseSchema.extend({
+  type: z.literal('note'),
+  data: RuntimeNoteItemDataSchema
+})
+
 export const KnowledgeAddItemInputSchema = z.discriminatedUnion('type', [
   CreateKnowledgeItemBaseSchema.extend({
     type: z.literal('file'),
     data: RuntimeFileItemDataSchema
   }),
   RuntimeUrlItemMemberSchema,
-  NoteItemMemberSchema,
+  RuntimeNoteItemMemberSchema,
   DirectoryItemMemberSchema
 ])
 export type KnowledgeAddItemInput = z.infer<typeof KnowledgeAddItemInputSchema>

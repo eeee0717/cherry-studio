@@ -14,6 +14,7 @@ import {
   CHERRY_SNAPSHOT_ORIGIN_V1_MIGRATION,
   serializeCherryUrlSnapshotFrontmatter
 } from '@main/features/knowledge/utils/sources/cherryFrontmatter'
+import { deriveNoteSnapshotSlug } from '@main/features/knowledge/utils/sources/noteSnapshot'
 import { deriveUrlSnapshotSlug } from '@main/features/knowledge/utils/sources/urlSnapshot'
 import {
   collectKnowledgeReservedRelativePaths,
@@ -45,7 +46,7 @@ const logger = loggerService.withContext('KnowledgeVectorMigrator')
 // (CHERRY_META_DIR / VECTOR_STORE_FILE / MATERIAL_ROOT_DIR). Runtime opens
 // {knowledgeBaseDir}/{baseId}/.cherry/index.sqlite by the migrated (new) base id, and resolves
 // every material's bytes at {knowledgeBaseDir}/{baseId}/raw/{relativePath}, so the migrator must
-// write the rebuilt store and any materialized url snapshot to those same nested paths.
+// write the rebuilt store and any materialized url/note snapshot to those same nested paths.
 const KNOWLEDGE_META_DIR = '.cherry'
 const KNOWLEDGE_VECTOR_STORE_FILE = 'index.sqlite'
 const KNOWLEDGE_MATERIAL_ROOT_DIR = 'raw'
@@ -96,15 +97,19 @@ interface PreparedMaterial {
 }
 
 /**
- * A url snapshot file to materialize under the base's `raw/` material root, so
- * migrated urls are real base files from day one — reindex then reads them
- * offline instead of re-fetching, and the material row drops the virtual item-id
- * path for the real snapshot path.
+ * A url or note snapshot file to materialize under the base's `raw/` material
+ * root, so migrated urls/notes are real base files from day one — reindex then
+ * reads them offline (a url reads its snapshot instead of re-fetching, a note
+ * reads its captured content) and the material row holds the real snapshot path.
  */
-interface PlannedUrlSnapshot {
+interface PlannedMaterialSnapshot {
   itemId: string
   relativePath: string
-  /** cherry frontmatter (origin: v1-migration) + the material's content text. */
+  /**
+   * The snapshot file's exact bytes: for a url, cherry frontmatter
+   * (origin: v1-migration) + the material's content text; for a note, the
+   * content text verbatim (no frontmatter, so the reader round-trips it exactly).
+   */
   fileText: string
   /** The item's data with `relativePath` pinned, written back to the migrated row. */
   data: KnowledgeItemData
@@ -115,7 +120,7 @@ interface PreparedBasePlan {
   materialDirPath: string
   targetDbPath: string
   materials: PreparedMaterial[]
-  urlSnapshots: PlannedUrlSnapshot[]
+  materialSnapshots: PlannedMaterialSnapshot[]
   expectedUnitCount: number
   // Distinct embedding hashes across the whole base (the embedding table is keyed
   // by hash, so identical chunk bodies — within or across materials — collapse to one row).
@@ -137,6 +142,11 @@ function toMaterialFieldSource(item: MigratedKnowledgeItemForVector): MaterialFi
   return { id: item.id, type: item.type, data: item.data } as MaterialFieldSource
 }
 
+/** The canonical content text of a migrated material: legacy chunk bodies joined by {@link DOCUMENT_SEPARATOR}. */
+function joinMigratedChunkText(chunks: MigratedChunk[]): string {
+  return chunks.map((chunk) => chunk.pageContent).join(DOCUMENT_SEPARATOR)
+}
+
 /**
  * Assemble one material rebuild input from a migrated item's preserved legacy
  * chunks (Route A — keep the v1 split). The canonical content text is the chunk
@@ -144,10 +154,14 @@ function toMaterialFieldSource(item: MigratedKnowledgeItemForVector): MaterialFi
  * exactly, so the store's `content.text.slice(charStart, charEnd) === body`
  * invariant holds by construction. Vectors are reused verbatim (no re-embedding)
  * and deduped by embedding-text hash, matching the index store's hash-keyed
- * embedding table.
+ * embedding table. The material's `relativePath` is resolved by the caller (a file
+ * uses its stored path; a url/note uses the snapshot it materializes this run).
  */
-function buildMigratedRebuildInput(item: MaterialFieldSource, chunks: MigratedChunk[]): PreparedMaterial {
-  const parts: string[] = []
+function buildMigratedRebuildInput(
+  item: MaterialFieldSource,
+  chunks: MigratedChunk[],
+  relativePath: string
+): PreparedMaterial {
   const units: RebuildMaterialInput['units'] = []
   const embeddingByHash = new Map<string, number[]>()
   let cursor = 0
@@ -160,7 +174,6 @@ function buildMigratedRebuildInput(item: MaterialFieldSource, chunks: MigratedCh
     const charEnd = cursor + chunk.pageContent.length
     cursor = charEnd
     units.push({ unitType: 'chunk', unitIndex: index, charStart, charEnd })
-    parts.push(chunk.pageContent)
 
     const embeddingTextHash = hashEmbeddingText(chunk.pageContent)
     if (!embeddingByHash.has(embeddingTextHash)) {
@@ -170,10 +183,10 @@ function buildMigratedRebuildInput(item: MaterialFieldSource, chunks: MigratedCh
 
   const input: RebuildMaterialInput = {
     material: {
-      relativePath: toMaterialRelativePath(item)
+      relativePath
     },
     content: {
-      text: parts.join(DOCUMENT_SEPARATOR)
+      text: joinMigratedChunkText(chunks)
     },
     units,
     embeddings: [...embeddingByHash.entries()].map(([embeddingTextHash, vector]) => ({ embeddingTextHash, vector }))
@@ -458,24 +471,25 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
         ])
 
         const materials: PreparedMaterial[] = []
-        const urlSnapshots: PlannedUrlSnapshot[] = []
+        const materialSnapshots: PlannedMaterialSnapshot[] = []
         const baseEmbeddingHashes = new Set<string>()
         let expectedUnitCount = 0
         for (const { item, chunks } of chunksByItem.values()) {
-          const material = buildMigratedRebuildInput(item, chunks)
+          // A file already has a real base path; a url/note materializes a snapshot
+          // this run and pins the row to it (so toMaterialRelativePath never falls back).
+          // A re-run after a partial migration may find the row already pinned (and that
+          // path already reserved above); reuse it instead of minting a `name-1.md` twin.
+          let relativePath: string
           if (item.type === 'url') {
-            // A re-run after a partial migration may find the row already pinned
-            // to a snapshot path (and that path already reserved above); reuse it
-            // instead of deduping into a useless `name-1.md` twin.
-            const relativePath =
+            const contentText = joinMigratedChunkText(chunks)
+            relativePath =
               item.data.relativePath ??
               reserveImportedFileRelativePath(
-                `${deriveUrlSnapshotSlug(material.input.content.text, item.data.url)}.md`,
+                `${deriveUrlSnapshotSlug(contentText, item.data.url)}.md`,
                 false,
                 reservedPaths
               )
-            material.input.material.relativePath = relativePath
-            urlSnapshots.push({
+            materialSnapshots.push({
               itemId: item.id,
               relativePath,
               fileText:
@@ -483,10 +497,25 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
                   source: item.data.url,
                   capturedAt,
                   origin: CHERRY_SNAPSHOT_ORIGIN_V1_MIGRATION
-                }) + material.input.content.text,
+                }) + contentText,
               data: { ...item.data, relativePath }
             })
+          } else if (item.type === 'note') {
+            relativePath =
+              item.data.relativePath ??
+              reserveImportedFileRelativePath(`${deriveNoteSnapshotSlug(item.data.source)}.md`, false, reservedPaths)
+            materialSnapshots.push({
+              itemId: item.id,
+              relativePath,
+              // Verbatim content, no frontmatter: the note reader round-trips this file exactly.
+              fileText: joinMigratedChunkText(chunks),
+              data: { ...item.data, relativePath }
+            })
+          } else {
+            relativePath = toMaterialRelativePath(item)
           }
+
+          const material = buildMigratedRebuildInput(item, chunks, relativePath)
           materials.push(material)
           expectedUnitCount += material.input.units.length
           for (const embedding of material.input.embeddings) {
@@ -502,7 +531,7 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
           materialDirPath: path.join(ctx.paths.knowledgeBaseDir, base.id, KNOWLEDGE_MATERIAL_ROOT_DIR),
           targetDbPath: this.getRuntimeVectorStorePath(ctx.paths.knowledgeBaseDir, base.id),
           materials,
-          urlSnapshots,
+          materialSnapshots,
           expectedUnitCount,
           expectedEmbeddingCount: baseEmbeddingHashes.size,
           sourceRowCount: vectorRows.length
@@ -589,15 +618,16 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
         await this.removeIndexStoreFiles(plan.targetDbPath)
         await fs.promises.rename(tempPath, plan.targetDbPath)
 
-        // Materialize each migrated url's snapshot file under the base's `raw/`
+        // Materialize each migrated url/note snapshot file under the base's `raw/`
         // material root (overwriting a previous partial run's copy) and pin the item
         // row to it, so the runtime's ensure-snapshot step reads it offline at
-        // {baseDir}/raw/{relativePath} instead of re-fetching the page. The material
-        // root may not exist yet (a url-only base copies no files), so ensure it first.
-        if (plan.urlSnapshots.length > 0) {
+        // {baseDir}/raw/{relativePath} (a url instead of re-fetching the page, a note
+        // instead of re-deriving from data). The material root may not exist yet (a
+        // url/note-only base copies no files), so ensure it first.
+        if (plan.materialSnapshots.length > 0) {
           await fs.promises.mkdir(plan.materialDirPath, { recursive: true })
         }
-        for (const snapshot of plan.urlSnapshots) {
+        for (const snapshot of plan.materialSnapshots) {
           await fs.promises.writeFile(
             path.join(plan.materialDirPath, snapshot.relativePath),
             snapshot.fileText,
@@ -614,7 +644,7 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
         logger.info('Migrated knowledge vector base as preserved-chunk concatenation', {
           baseId: plan.baseId,
           materials: plan.materials.length,
-          urlSnapshots: plan.urlSnapshots.length,
+          materialSnapshots: plan.materialSnapshots.length,
           units: plan.expectedUnitCount,
           embeddings: plan.expectedEmbeddingCount
         })
@@ -667,17 +697,17 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
           continue
         }
 
-        // The rebuilt store's url material rows reference these snapshot paths,
+        // The rebuilt store's url/note material rows reference these snapshot paths,
         // so a missing file would surface later as an unreadable material.
-        const missingSnapshots = plan.urlSnapshots.filter(
+        const missingSnapshots = plan.materialSnapshots.filter(
           (snapshot) => !fs.existsSync(path.join(plan.materialDirPath, snapshot.relativePath))
         )
         if (missingSnapshots.length > 0) {
           errors.push({
-            key: `knowledge_vector_url_snapshots_${plan.baseId}`,
-            expected: plan.urlSnapshots.length,
-            actual: plan.urlSnapshots.length - missingSnapshots.length,
-            message: `Missing ${missingSnapshots.length} materialized url snapshot files in base ${plan.baseId}: ${missingSnapshots
+            key: `knowledge_vector_material_snapshots_${plan.baseId}`,
+            expected: plan.materialSnapshots.length,
+            actual: plan.materialSnapshots.length - missingSnapshots.length,
+            message: `Missing ${missingSnapshots.length} materialized url/note snapshot files in base ${plan.baseId}: ${missingSnapshots
               .slice(0, SKIP_WARNING_SAMPLE_LIMIT)
               .map((snapshot) => snapshot.relativePath)
               .join(', ')}`

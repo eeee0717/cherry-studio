@@ -22,11 +22,13 @@ const mocks = vi.hoisted(() => ({
   knowledgeItemUpdateIndexedRelativePathMock: vi.fn(),
   knowledgeItemGetItemsByBaseIdMock: vi.fn(),
   knowledgeItemUpdateUrlSnapshotRelativePathMock: vi.fn(),
+  knowledgeItemUpdateNoteSnapshotRelativePathMock: vi.fn(),
   listMock: vi.fn(),
   loadKnowledgeItemDocumentsMock: vi.fn(),
   prepareKnowledgeItemMock: vi.fn(),
   fetchKnowledgeWebPageMock: vi.fn(),
   captureUrlSnapshotFileMock: vi.fn(),
+  captureNoteSnapshotFileMock: vi.fn(),
   rebuildMaterialMock: vi.fn(),
   deleteMaterialMock: vi.fn(),
   listExistingEmbeddingHashesMock: vi.fn(),
@@ -51,11 +53,13 @@ export const {
   knowledgeItemUpdateIndexedRelativePathMock,
   knowledgeItemGetItemsByBaseIdMock,
   knowledgeItemUpdateUrlSnapshotRelativePathMock,
+  knowledgeItemUpdateNoteSnapshotRelativePathMock,
   listMock,
   loadKnowledgeItemDocumentsMock,
   prepareKnowledgeItemMock,
   fetchKnowledgeWebPageMock,
   captureUrlSnapshotFileMock,
+  captureNoteSnapshotFileMock,
   rebuildMaterialMock,
   deleteMaterialMock,
   listExistingEmbeddingHashesMock,
@@ -119,6 +123,7 @@ vi.mock('@data/services/KnowledgeItemService', () => ({
     setSubtreeStatus: knowledgeItemSetSubtreeStatusMock,
     updateIndexedRelativePath: knowledgeItemUpdateIndexedRelativePathMock,
     updateUrlSnapshotRelativePath: knowledgeItemUpdateUrlSnapshotRelativePathMock,
+    updateNoteSnapshotRelativePath: knowledgeItemUpdateNoteSnapshotRelativePathMock,
     updateStatus: knowledgeItemUpdateStatusMock
   }
 }))
@@ -137,6 +142,10 @@ vi.mock('../../utils/sources/url', () => ({
 
 vi.mock('../../utils/sources/urlSnapshot', () => ({
   captureUrlSnapshotFile: captureUrlSnapshotFileMock
+}))
+
+vi.mock('../../utils/sources/noteSnapshot', () => ({
+  captureNoteSnapshotFile: captureNoteSnapshotFileMock
 }))
 
 vi.mock('../../utils/storage/pathStorage', async () => {
@@ -190,14 +199,18 @@ export function createBase(): KnowledgeBase {
 export function createNoteItem(
   id = 'note-1',
   groupId: string | null = null,
-  status: Exclude<KnowledgeItemOf<'note'>['status'], 'failed'> = 'processing'
+  status: Exclude<KnowledgeItemOf<'note'>['status'], 'failed'> = 'processing',
+  // Default to an already-captured snapshot so the item is a valid indexable
+  // leaf that passes straight through ensureNoteSnapshot; pass undefined (or
+  // override `data`) to exercise the first-index capture path.
+  relativePath: string | undefined = `${id}.md`
 ): KnowledgeItemOf<'note'> {
   return {
     id,
     baseId: 'kb-1',
     groupId,
     type: 'note',
-    data: { source: id, content: `hello ${id}` },
+    data: { source: id, content: `hello ${id}`, ...(relativePath ? { relativePath } : {}) },
     status,
     error: null,
     createdAt: '2026-04-08T00:00:00.000Z',
@@ -335,6 +348,10 @@ beforeEach(() => {
   captureUrlSnapshotFileMock.mockResolvedValue('example-page.md')
   knowledgeItemUpdateUrlSnapshotRelativePathMock.mockImplementation(async (id: string, relativePath: string) =>
     createUrlItem(id, relativePath)
+  )
+  captureNoteSnapshotFileMock.mockResolvedValue('note-snapshot.md')
+  knowledgeItemUpdateNoteSnapshotRelativePathMock.mockImplementation(async (id: string, relativePath: string) =>
+    createNoteItem(id, null, 'processing', relativePath)
   )
   loadKnowledgeItemDocumentsMock.mockResolvedValue([
     {

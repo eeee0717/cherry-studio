@@ -15,6 +15,7 @@ import { type ChunkedKnowledgeContent, chunkKnowledgeDocuments } from '../utils/
 import { embedKnowledgeTexts } from '../utils/indexing/embed'
 import { toMaterialRelativePath } from '../utils/indexing/materialFields'
 import { isIndexableKnowledgeItem } from '../utils/items'
+import { captureNoteSnapshotFile } from '../utils/sources/noteSnapshot'
 import { fetchKnowledgeWebPage } from '../utils/sources/url'
 import { captureUrlSnapshotFile } from '../utils/sources/urlSnapshot'
 import { collectKnowledgeReservedRelativePaths } from '../utils/storage/pathStorage'
@@ -61,10 +62,15 @@ export function createIndexDocumentsJobHandler(
         await knowledgeItemService.updateStatus(ctx.input.itemId, 'reading')
       })
 
-      // Capture a URL's snapshot on first index (fetch outside the lock, persist
-      // its relativePath under it), then read every item from disk. Read and chunk
-      // outside the base lock; these phases can be slow and do not mutate shared state.
-      const readableItem = await ensureUrlSnapshot(ctx, item, knowledgeLockManager)
+      // Capture a url's or note's snapshot on first index (a url fetches outside
+      // the lock, a note writes its in-hand content; both persist a relativePath
+      // under it), then read every item from disk. Read and chunk outside the base
+      // lock; these phases can be slow and do not mutate shared state.
+      const readableItem = await ensureNoteSnapshot(
+        ctx,
+        await ensureUrlSnapshot(ctx, item, knowledgeLockManager),
+        knowledgeLockManager
+      )
       const documents = await readItemDocuments(ctx, readableItem)
       const chunked = chunkItemDocuments(base, documents)
       if (chunked.chunks.length === 0) {
@@ -179,6 +185,41 @@ async function ensureUrlSnapshot(
     )
     const relativePath = await captureUrlSnapshotFile(item.baseId, item.data.url, markdown, reservedPaths)
     const updated = await knowledgeItemService.updateUrlSnapshotRelativePath(ctx.input.itemId, relativePath)
+    return isIndexableKnowledgeItem(updated) ? updated : item
+  })
+}
+
+/**
+ * Ensure a note item has an on-disk snapshot before it is read. A note without a
+ * `relativePath` (freshly added or migrated from v1) has its in-hand content
+ * written to a base file here and its `relativePath` persisted — so this and
+ * every later reindex read the snapshot from disk. Unlike a url there is no
+ * network fetch (the content is already on the item), so the whole capture runs
+ * under the base mutation lock; the name allocation, file write, and persistence
+ * stay serialized, so concurrent captures in the same base cannot pick the same
+ * path. Non-note items, and notes that already have a snapshot, pass straight
+ * through.
+ */
+async function ensureNoteSnapshot(
+  ctx: JobContext<KnowledgeIndexDocumentsPayload>,
+  item: IndexableKnowledgeItem,
+  knowledgeLockManager: KnowledgeLockManager
+): Promise<IndexableKnowledgeItem> {
+  if (item.type !== 'note' || item.data.relativePath) {
+    return item
+  }
+
+  return await knowledgeLockManager.withBaseMutationLock(ctx.input.baseId, async () => {
+    const latest = await knowledgeItemService.getById(ctx.input.itemId)
+    if (latest.type !== 'note' || latest.data.relativePath) {
+      // Another job captured the snapshot (or the item changed) while we waited.
+      return isIndexableKnowledgeItem(latest) ? latest : item
+    }
+    const reservedPaths = collectKnowledgeReservedRelativePaths(
+      await knowledgeItemService.getItemsByBaseId(ctx.input.baseId)
+    )
+    const relativePath = await captureNoteSnapshotFile(item.baseId, item.data.source, item.data.content, reservedPaths)
+    const updated = await knowledgeItemService.updateNoteSnapshotRelativePath(ctx.input.itemId, relativePath)
     return isIndexableKnowledgeItem(updated) ? updated : item
   })
 }

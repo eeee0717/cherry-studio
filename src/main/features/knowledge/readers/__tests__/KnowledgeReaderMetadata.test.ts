@@ -119,43 +119,42 @@ describe('knowledge reader metadata', () => {
     ).rejects.toThrow('has no captured snapshot')
   })
 
-  it('uses note sourceUrl as source metadata', async () => {
+  it('reads the note snapshot verbatim and tags the source', async () => {
+    readFileMock.mockResolvedValueOnce('# Note title\n\nbody')
+
     const documents = await loadNoteDocuments({
       id: 'note-item-1',
       baseId: 'kb-1',
       groupId: null,
       type: 'note',
-      data: {
-        source: 'https://example.com/note',
-        content: '\n  Note title\nbody',
-        sourceUrl: 'https://example.com/note'
-      },
+      data: { source: 'My note', content: '# Note title\n\nbody', relativePath: 'My note.md' },
       status: 'idle',
       error: null,
       createdAt: '2026-04-08T00:00:00.000Z',
       updatedAt: '2026-04-08T00:00:00.000Z'
     })
 
+    expect(readFileMock).toHaveBeenCalledWith('/mock/feature.knowledgebase.data/kb-1/raw/My note.md')
+    expect(documents).toHaveLength(1)
+    expect(documents[0]?.text).toBe('# Note title\n\nbody')
     expect(documents[0]?.metadata).toEqual({
-      source: 'https://example.com/note'
+      source: 'My note'
     })
   })
 
-  it('uses note source as source metadata when content is blank', async () => {
-    const documents = await loadNoteDocuments({
-      id: 'note-item-1',
-      baseId: 'kb-1',
-      groupId: null,
-      type: 'note',
-      data: { source: 'note-item-1', content: '   ' },
-      status: 'idle',
-      error: null,
-      createdAt: '2026-04-08T00:00:00.000Z',
-      updatedAt: '2026-04-08T00:00:00.000Z'
-    })
-
-    expect(documents[0]?.metadata).toEqual({
-      source: 'note-item-1'
-    })
+  it('rejects a note item with no captured snapshot', async () => {
+    await expect(
+      loadNoteDocuments({
+        id: 'note-item-1',
+        baseId: 'kb-1',
+        groupId: null,
+        type: 'note',
+        data: { source: 'My note', content: 'body' },
+        status: 'idle',
+        error: null,
+        createdAt: '2026-04-08T00:00:00.000Z',
+        updatedAt: '2026-04-08T00:00:00.000Z'
+      })
+    ).rejects.toThrow('has no captured snapshot')
   })
 })
