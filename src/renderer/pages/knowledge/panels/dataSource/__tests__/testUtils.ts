@@ -27,14 +27,11 @@ const createLeafLifecycle = (status: KnowledgeItemOf<'file'>['status']): LeafKno
   }
 }
 
-const createContainerLifecycle = (
-  status: KnowledgeItemOf<'directory'>['status'],
-  error = 'Indexing failed'
-): ContainerKnowledgeItemLifecycle => {
+const createContainerLifecycle = (status: KnowledgeItemOf<'directory'>['status']): ContainerKnowledgeItemLifecycle => {
   if (status === 'failed') {
     return {
       status,
-      error
+      error: 'Indexing failed'
     }
   }
 
@@ -108,16 +105,14 @@ export const createUrlItem = ({
 export const createDirectoryItem = ({
   id,
   source = `/Users/eeee/${id}`,
-  status = 'completed',
-  error
+  status = 'completed'
 }: {
   id: string
   source?: string
   status?: KnowledgeItemOf<'directory'>['status']
-  error?: string
 }): KnowledgeItemOf<'directory'> => ({
   ...baseFields,
-  ...createContainerLifecycle(status, error),
+  ...createContainerLifecycle(status),
   id,
   type: 'directory',
   data: {

@@ -7,7 +7,6 @@ import {
   DEFAULT_KNOWLEDGE_BASE_STATUS,
   DEFAULT_KNOWLEDGE_SEARCH_MODE,
   KNOWLEDGE_BASE_ERROR_MISSING_EMBEDDING_MODEL,
-  KNOWLEDGE_ITEM_ERROR_DIRECTORY_NOT_MIGRATED,
   type KnowledgeItemData,
   type KnowledgeItemStatus
 } from '@shared/data/types/knowledge'
@@ -393,15 +392,7 @@ export const transformKnowledgeItem = (
     }
   }
 
-  const inferredStatus = inferKnowledgeItemStatus(item)
-  // A v1-indexed folder is one container item whose files were embedded under its
-  // loader ids; the vector migrator drops those container-level vectors (no v2
-  // home), so letting the directory claim `completed` would leave an empty shell
-  // that never re-indexes. Fail it with a code the UI renders as a re-embed
-  // warning. Interrupted (failed) and never-indexed (idle) directories keep the
-  // shared mapping.
-  const directoryIndexDropped = type === 'directory' && inferredStatus === 'completed'
-  const status = directoryIndexDropped ? 'failed' : inferredStatus
+  const status = inferKnowledgeItemStatus(item)
 
   return {
     ok: true,
@@ -414,9 +405,7 @@ export const transformKnowledgeItem = (
       type,
       data,
       status,
-      error: directoryIndexDropped
-        ? KNOWLEDGE_ITEM_ERROR_DIRECTORY_NOT_MIGRATED
-        : normalizeKnowledgeItemError(status, item.processingStatus, item.processingError),
+      error: normalizeKnowledgeItemError(status, item.processingStatus, item.processingError),
       createdAt: toTimestamp(item.created_at),
       updatedAt: toTimestamp(item.updated_at)
     },

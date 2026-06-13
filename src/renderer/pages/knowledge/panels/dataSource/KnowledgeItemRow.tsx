@@ -12,9 +12,8 @@ import {
 } from '@cherrystudio/ui'
 import { cn } from '@cherrystudio/ui/lib/utils'
 import { formatRelativeTime } from '@renderer/pages/knowledge/utils'
-import { getKnowledgeItemFailureReason } from '@renderer/pages/knowledge/utils/error'
 import { formatErrorMessageWithPrefix } from '@renderer/utils/error'
-import { KNOWLEDGE_ITEM_ERROR_DIRECTORY_NOT_MIGRATED, type KnowledgeItem } from '@shared/data/types/knowledge'
+import type { KnowledgeItem } from '@shared/data/types/knowledge'
 import { BookOpen, Check, CircleAlert, Eye, LoaderCircle, MoreHorizontal, RefreshCw, Trash2 } from 'lucide-react'
 import type { ComponentProps, MouseEvent } from 'react'
 import { useState } from 'react'
@@ -243,21 +242,9 @@ const KnowledgeItemRow = ({
     i18n: { language },
     t
   } = useTranslation()
-  const { icon, metaParts, status: lifecycleStatus, suffix, title } = toKnowledgeItemRowViewModel(item, language)
+  const { icon, metaParts, status, suffix, title } = toKnowledgeItemRowViewModel(item, language)
   const Icon = icon.icon
-  // A migrated v1 folder fails with a code, not a free-form message: its index was
-  // dropped by design and re-embedding restores it, so render an amber re-embed
-  // warning instead of the red error badge.
-  const isDirectoryNotMigrated = item.status === 'failed' && item.error === KNOWLEDGE_ITEM_ERROR_DIRECTORY_NOT_MIGRATED
-  const status: DataSourceStatusViewModel = isDirectoryNotMigrated
-    ? {
-        kind: 'failed',
-        labelKey: 'knowledge.data_source.status.needs_reembed',
-        textClassName: 'text-amber-500/70',
-        icon: 'alert'
-      }
-    : lifecycleStatus
-  const failureReason = item.status === 'failed' ? getKnowledgeItemFailureReason(item, t) : null
+  const failureReason = item.status === 'failed' ? item.error : null
   const canReindex = item.status === 'completed' || item.status === 'failed'
   const canViewChunks = item.status === 'completed'
   const typeLabel = t(dataSourceTypeDisplayConfig[item.type].filterLabelKey)
