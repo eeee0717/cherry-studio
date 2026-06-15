@@ -2,7 +2,7 @@ import { read } from '@main/utils/file/fs'
 import type { KnowledgeItemOf, KnowledgeSourceMetadata } from '@shared/data/types/knowledge'
 import { Document, type Document as VectorStoreDocument } from '@vectorstores/core'
 
-import { stripCherryFrontmatter } from '../utils/sources/cherryFrontmatter'
+import { stripOkfFrontmatter } from '../utils/sources/okfFrontmatter'
 import { getKnowledgeBaseFilePath } from '../utils/storage/pathStorage'
 
 /**
@@ -11,8 +11,8 @@ import { getKnowledgeBaseFilePath } from '../utils/storage/pathStorage'
  * its `relativePath`) before this runs, so a missing `relativePath` here is a
  * contract violation, not a "fetch it now" fallback.
  *
- * The snapshot is read verbatim minus its `cherry` frontmatter block — not
- * through the markdown reader, whose lossy transforms (header re-splitting,
+ * The snapshot is read verbatim minus its OKF frontmatter block — not through
+ * the markdown reader, whose lossy transforms (header re-splitting,
  * hyperlink/image removal) would break the round-trip the snapshot exists for:
  * file text → canonical `content.text` must be exact, so the stored index can
  * be reconciled against the file by content hash instead of re-embedding.
@@ -23,7 +23,7 @@ export async function loadUrlDocuments(item: KnowledgeItemOf<'url'>): Promise<Ve
   }
 
   const filePath = getKnowledgeBaseFilePath(item.baseId, item.data.relativePath)
-  const text = stripCherryFrontmatter(await read(filePath))
+  const text = stripOkfFrontmatter(await read(filePath))
   const sourceMetadata: KnowledgeSourceMetadata = { source: item.data.source }
 
   return [new Document({ text, metadata: { ...sourceMetadata } })]

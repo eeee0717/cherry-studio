@@ -25,6 +25,7 @@ vi.mock('../../storage/pathStorage', async () => {
 })
 
 const { deriveNoteSnapshotSlug, captureNoteSnapshotFile } = await import('../noteSnapshot')
+const { stripOkfFrontmatter } = await import('../okfFrontmatter')
 
 describe('deriveNoteSnapshotSlug', () => {
   it('uses the note source title', () => {
@@ -51,13 +52,16 @@ describe('captureNoteSnapshotFile', () => {
     writeFileIntoKnowledgeBaseAtMock.mockImplementation(async (_baseId: string, relativePath: string) => relativePath)
   })
 
-  it('writes the content verbatim under a title-derived name and returns its relative path', async () => {
+  it('writes an OKF-frontmatter snapshot under a title-derived name and returns its relative path', async () => {
     const content = '# My note\n\nbody'
     const relativePath = await captureNoteSnapshotFile('kb-1', 'My note', content, new Set())
 
     expect(relativePath).toBe('My note.md')
-    // Written verbatim — no cherry frontmatter, so the file text round-trips exactly.
-    expect(writeFileIntoKnowledgeBaseAtMock).toHaveBeenCalledWith('kb-1', 'My note.md', content)
+    const written = writeFileIntoKnowledgeBaseAtMock.mock.calls[0][2] as string
+    expect(written).toMatch(/^---\ntype: "Note"\ntitle: "My note"\n/)
+    expect(written).toMatch(/timestamp: "\d{4}-\d{2}-\d{2}T[^"]+"\n/)
+    // The frontmatter strips back off to recover the canonical note content.
+    expect(stripOkfFrontmatter(written)).toBe(content)
   })
 
   it('renames around an already-reserved snapshot name', async () => {
@@ -65,6 +69,6 @@ describe('captureNoteSnapshotFile', () => {
     const relativePath = await captureNoteSnapshotFile('kb-1', 'My note', 'body', reserved)
 
     expect(relativePath).toBe('My note_1.md')
-    expect(writeFileIntoKnowledgeBaseAtMock).toHaveBeenCalledWith('kb-1', 'My note_1.md', 'body')
+    expect(writeFileIntoKnowledgeBaseAtMock).toHaveBeenCalledWith('kb-1', 'My note_1.md', expect.any(String))
   })
 })

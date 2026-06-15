@@ -10,12 +10,12 @@ import {
   type MaterialFieldSource,
   toMaterialRelativePath
 } from '@main/features/knowledge/utils/indexing/materialFields'
-import {
-  CHERRY_SNAPSHOT_ORIGIN_V1_MIGRATION,
-  serializeCherryUrlSnapshotFrontmatter
-} from '@main/features/knowledge/utils/sources/cherryFrontmatter'
 import { deriveNoteSnapshotSlug } from '@main/features/knowledge/utils/sources/noteSnapshot'
-import { deriveUrlSnapshotSlug } from '@main/features/knowledge/utils/sources/urlSnapshot'
+import {
+  OKF_SNAPSHOT_ORIGIN_V1_MIGRATION,
+  serializeOkfFrontmatter
+} from '@main/features/knowledge/utils/sources/okfFrontmatter'
+import { deriveUrlSnapshotSlug, deriveUrlSnapshotTitle } from '@main/features/knowledge/utils/sources/urlSnapshot'
 import {
   collectKnowledgeReservedRelativePaths,
   reserveImportedFileRelativePath
@@ -493,22 +493,31 @@ export class KnowledgeVectorMigrator extends BaseMigrator {
               itemId: item.id,
               relativePath,
               fileText:
-                serializeCherryUrlSnapshotFrontmatter({
-                  source: item.data.url,
-                  capturedAt,
-                  origin: CHERRY_SNAPSHOT_ORIGIN_V1_MIGRATION
+                serializeOkfFrontmatter({
+                  type: 'URL',
+                  title: deriveUrlSnapshotTitle(contentText, item.data.url),
+                  resource: item.data.url,
+                  timestamp: capturedAt,
+                  origin: OKF_SNAPSHOT_ORIGIN_V1_MIGRATION
                 }) + contentText,
               data: { ...item.data, relativePath }
             })
           } else if (item.type === 'note') {
+            const contentText = joinMigratedChunkText(chunks)
             relativePath =
               item.data.relativePath ??
               reserveImportedFileRelativePath(`${deriveNoteSnapshotSlug(item.data.source)}.md`, false, reservedPaths)
             materialSnapshots.push({
               itemId: item.id,
               relativePath,
-              // Verbatim content, no frontmatter: the note reader round-trips this file exactly.
-              fileText: joinMigratedChunkText(chunks),
+              // OKF frontmatter + content; the note reader strips it to round-trip the body.
+              fileText:
+                serializeOkfFrontmatter({
+                  type: 'Note',
+                  title: item.data.source,
+                  timestamp: capturedAt,
+                  origin: OKF_SNAPSHOT_ORIGIN_V1_MIGRATION
+                }) + contentText,
               data: { ...item.data, relativePath }
             })
           } else {

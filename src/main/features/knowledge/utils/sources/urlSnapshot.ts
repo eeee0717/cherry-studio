@@ -1,7 +1,7 @@
 import { sanitizeFilename } from '@shared/file/types/filename'
 
 import { reserveImportedFileRelativePath, writeFileIntoKnowledgeBaseAt } from '../storage/pathStorage'
-import { serializeCherryUrlSnapshotFrontmatter } from './cherryFrontmatter'
+import { serializeOkfFrontmatter } from './okfFrontmatter'
 
 const SNAPSHOT_TITLE_MAX = 80
 
@@ -20,6 +20,20 @@ export function deriveUrlSnapshotSlug(markdown: string, url: string): string {
     return fromUrl
   }
   return 'page'
+}
+
+/**
+ * The page's display title for the OKF `title` field: the first markdown
+ * heading (or non-empty line), unsanitized, capped at {@link SNAPSHOT_TITLE_MAX};
+ * falls back to the URL host + last segment, then the raw URL. Unlike the slug
+ * this keeps spaces/punctuation, since it is a frontmatter value, not a filename.
+ */
+export function deriveUrlSnapshotTitle(markdown: string, url: string): string {
+  const fromMarkdown = firstHeadingOrLine(markdown).slice(0, SNAPSHOT_TITLE_MAX).trim()
+  if (fromMarkdown) {
+    return fromMarkdown
+  }
+  return urlStem(url).slice(0, SNAPSHOT_TITLE_MAX).trim() || url
 }
 
 function firstHeadingOrLine(markdown: string): string {
@@ -47,9 +61,9 @@ function urlStem(url: string): string {
  * already occupied in the base; callers build it and call this under the base
  * mutation lock so two concurrent captures cannot pick the same path.
  *
- * The file is the markdown prefixed with the `cherry` frontmatter block, which
- * records the source URL on the file itself; reading for indexing strips it
- * back off.
+ * The file is the markdown prefixed with the OKF frontmatter block, which
+ * records the source URL and title on the file itself; reading for indexing
+ * strips it back off.
  */
 export async function captureUrlSnapshotFile(
   baseId: string,
@@ -62,9 +76,11 @@ export async function captureUrlSnapshotFile(
     false,
     reservedPaths
   )
-  const frontmatter = serializeCherryUrlSnapshotFrontmatter({
-    source: url,
-    capturedAt: new Date().toISOString()
+  const frontmatter = serializeOkfFrontmatter({
+    type: 'URL',
+    title: deriveUrlSnapshotTitle(markdown, url),
+    resource: url,
+    timestamp: new Date().toISOString()
   })
   return await writeFileIntoKnowledgeBaseAt(baseId, relativePath, frontmatter + markdown)
 }

@@ -1,6 +1,7 @@
 import { sanitizeFilename } from '@shared/file/types/filename'
 
 import { reserveImportedFileRelativePath, writeFileIntoKnowledgeBaseAt } from '../storage/pathStorage'
+import { serializeOkfFrontmatter } from './okfFrontmatter'
 
 const SNAPSHOT_TITLE_MAX = 80
 
@@ -20,10 +21,9 @@ export function deriveNoteSnapshotSlug(source: string): string {
 /**
  * Write a note's content into the base as a markdown snapshot under a
  * collision-free, readable name and return its base-relative path. Mirrors
- * captureUrlSnapshotFile but takes the content directly (no network fetch) and
- * writes it verbatim — no `cherry` frontmatter: the note content is already the
- * canonical markdown the reader indexes, so the file text -> content round-trip
- * must stay exact.
+ * captureUrlSnapshotFile but takes the content directly (no network fetch). The
+ * content is prefixed with an OKF frontmatter block recording the note's title;
+ * reading for indexing strips it back off to recover the canonical `content.text`.
  *
  * `reservedPaths` is the set of names already occupied in the base; callers
  * build it and call this under the base mutation lock so two concurrent captures
@@ -36,5 +36,10 @@ export async function captureNoteSnapshotFile(
   reservedPaths: Set<string>
 ): Promise<string> {
   const relativePath = reserveImportedFileRelativePath(`${deriveNoteSnapshotSlug(source)}.md`, false, reservedPaths)
-  return await writeFileIntoKnowledgeBaseAt(baseId, relativePath, content)
+  const frontmatter = serializeOkfFrontmatter({
+    type: 'Note',
+    title: source,
+    timestamp: new Date().toISOString()
+  })
+  return await writeFileIntoKnowledgeBaseAt(baseId, relativePath, frontmatter + content)
 }

@@ -4,7 +4,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { createClient } from '@libsql/client'
-import { stripCherryFrontmatter } from '@main/features/knowledge/utils/sources/cherryFrontmatter'
+import { stripOkfFrontmatter } from '@main/features/knowledge/utils/sources/okfFrontmatter'
 import { hashEmbeddingText } from '@main/features/knowledge/vectorstore/indexStore/hashing'
 import { KnowledgeIndexStore } from '@main/features/knowledge/vectorstore/indexStore/KnowledgeIndexStore'
 import { encodeVectorBlob } from '@main/features/knowledge/vectorstore/indexStore/vectorBlob'
@@ -1189,13 +1189,13 @@ describe('KnowledgeVectorMigrator', () => {
       const snapshotPath = runtimeMaterialPath(MIGRATED_KNOWLEDGE_BASE_ID, 'LLM Guide.md')
       expect(fs.existsSync(snapshotPath)).toBe(true)
       const fileText = fs.readFileSync(snapshotPath, 'utf-8')
-      expect(fileText).toMatch(/^---\ncherry:\n {2}type: url-snapshot\n {2}source: "https:\/\/example\.com\/guide"\n/)
-      expect(fileText).toMatch(/ {2}captured_at: "\d{4}-\d{2}-\d{2}T[^"]+"\n/)
-      expect(fileText).toContain('  origin: "v1-migration"\n')
+      expect(fileText).toMatch(/^---\ntype: "URL"\ntitle: "LLM Guide"\nresource: "https:\/\/example\.com\/guide"\n/)
+      expect(fileText).toMatch(/timestamp: "\d{4}-\d{2}-\d{2}T[^"]+"\n/)
+      expect(fileText).toContain('origin: "v1-migration"\n')
 
       const store = await readStore(MIGRATED_KNOWLEDGE_BASE_ID)
       expect(store.content[0].text).toBe('# LLM Guide\n\nsecond chunk')
-      expect(stripCherryFrontmatter(fileText)).toBe(store.content[0].text)
+      expect(stripOkfFrontmatter(fileText)).toBe(store.content[0].text)
 
       // The material row uses the real snapshot path, not the virtual item id.
       expect(store.material[0]).toMatchObject({
@@ -1404,17 +1404,18 @@ describe('KnowledgeVectorMigrator', () => {
       expect((await migrator.prepare(migrationCtx as any)).success).toBe(true)
       expect((await migrator.execute(migrationCtx as any)).success).toBe(true)
 
-      // The snapshot lands under a source-title-derived name, written verbatim — no
-      // cherry frontmatter — so its bytes equal the stored content text exactly (the
-      // hash round-trip that lets reindex reuse the migrated vectors).
+      // The snapshot lands under a source-title-derived name, stamped with OKF
+      // frontmatter that strips back off to exactly the stored content text — the
+      // hash round-trip that lets reindex reuse the migrated vectors.
       const snapshotPath = runtimeMaterialPath(MIGRATED_KNOWLEDGE_BASE_ID, 'Meeting notes.md')
       expect(fs.existsSync(snapshotPath)).toBe(true)
       const fileText = fs.readFileSync(snapshotPath, 'utf-8')
-      expect(fileText).not.toMatch(/^---\ncherry:/)
+      expect(fileText).toMatch(/^---\ntype: "Note"\ntitle: "Meeting notes"\n/)
+      expect(fileText).toContain('origin: "v1-migration"\n')
 
       const store = await readStore(MIGRATED_KNOWLEDGE_BASE_ID)
       expect(store.content[0].text).toBe('# Meeting notes\n\nsecond chunk')
-      expect(fileText).toBe(store.content[0].text)
+      expect(stripOkfFrontmatter(fileText)).toBe(store.content[0].text)
 
       // The material row uses the real snapshot path, not the virtual item id.
       expect(store.material[0]).toMatchObject({
