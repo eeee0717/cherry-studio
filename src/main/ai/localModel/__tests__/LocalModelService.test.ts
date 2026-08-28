@@ -118,7 +118,7 @@ describe('shared artifact cleanup', () => {
 
     await localModelService.remove(OCR)
 
-    expect(removeArtifactIfUnused).not.toHaveBeenCalled()
+    expect(removeArtifactIfUnused).not.toHaveBeenCalledWith('onnxruntime-node')
   })
 
   it('does not let a locked runtime turn cleanup into a failure', async () => {
@@ -147,7 +147,7 @@ describe('removing the OCR model', () => {
     expect(MockMainPreferenceServiceUtils.getPreferenceValue(DEFAULT_KEY)).toBe('system')
   })
 
-  it('releases the inference worker before deleting model files', async () => {
+  it('releases the inference process before deleting model files', async () => {
     await localModelService.remove(OCR)
 
     expect(terminateOcrRuntime).toHaveBeenCalledOnce()

@@ -1,7 +1,7 @@
 ---
 description: Design RFC for the core/utilityProcess V1 generic layer (#19621) — interface, protocol, failure policy, build mechanism, and experiment evidence
 sources:
-  - src/main/ai/inference/InferenceServiceBase.ts
+  - src/main/ai/localModel/runtime/InferenceServiceBase.ts
   - src/main/ai/tools/codeMode/runtime.ts
   - src/main/services/screenshot/windowEnumerator.ts
   - src/main/services/readableContent/ReadableContentService.ts

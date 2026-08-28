@@ -23,6 +23,7 @@ let runtimeProfile: LocalInferenceRuntimeProfile = CPU_LOCAL_INFERENCE_PROFILE
 let proxyStatus = 'not-initialized'
 let transformers: any = null
 let ppu: any = null
+let sherpa: any = null
 
 /** Cached heavyweight resources, keyed by whatever identifies the model. */
 const cachedResources = new Map<string, Promise<DisposableResource>>()
@@ -64,10 +65,10 @@ export function applyInitData(initData: InferenceInitData, logger: UtilityProces
     logger.error(`network proxy configuration failed: ${proxy.error}`)
   }
 
-  // Must be set before the first lazy require of @huggingface/transformers / ppu-paddle-ocr,
-  // both of which transitively require onnxruntime-node — see patches/onnxruntime-node@1.25.1.patch.
-  const bindingPath = initData.artifactPaths['onnxruntime-node']
-  if (bindingPath) process.env.CHERRY_ONNXRUNTIME_BINDING_PATH = bindingPath
+  const onnxRuntimeBindingPath = initData.artifactPaths['onnxruntime-node']
+  if (onnxRuntimeBindingPath) process.env.CHERRY_ONNXRUNTIME_BINDING_PATH = onnxRuntimeBindingPath
+  const sherpaOnnxBindingPath = initData.artifactPaths['sherpa-onnx']
+  if (sherpaOnnxBindingPath) process.env.CHERRY_SHERPA_ONNX_BINDING_PATH = sherpaOnnxBindingPath
 }
 
 /** Resolves off the app root, matching how the packaged app finds these packages. */
@@ -87,6 +88,11 @@ export async function getPpu(): Promise<any> {
     ppu = await import(pathToFileURL(projectRequire().resolve('ppu-paddle-ocr')).href)
   }
   return ppu
+}
+
+export function getSherpa(): any {
+  sherpa ??= projectRequire()('sherpa-onnx-node')
+  return sherpa
 }
 
 /** Memoizes a loaded model, dropping the entry on failure so a later request can retry. */

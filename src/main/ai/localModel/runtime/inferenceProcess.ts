@@ -3,14 +3,12 @@ import { defineUtilityProcess } from '@main/core/utilityProcess/defineUtilityPro
 import type { UtilityProcessMethod } from '@main/core/utilityProcess/types'
 import type { LocalModelCapability } from '@shared/data/presets/localModel'
 
-import type {
-  EmbeddingCountTokensPayload,
-  EmbeddingEmbedPayload
-} from '../capabilities/embedding/protocol'
+import type { AsrSegment, AsrTranscribePayload } from '../capabilities/asr/protocol'
+import type { EmbeddingCountTokensPayload, EmbeddingEmbedPayload } from '../capabilities/embedding/protocol'
 import type { OcrLine, OcrRecognizePayload } from '../capabilities/ocr/protocol'
 import { bundleForCapability } from '../catalog/catalog'
 import { localModelStorageService } from '../installation/LocalModelStorageService'
-import { resolveLocalInferenceProfile } from './inferenceAcceleration'
+import { CPU_LOCAL_INFERENCE_PROFILE, resolveLocalInferenceProfile } from './inferenceAcceleration'
 import type { InferenceInitData } from './protocol'
 
 export type EmbeddingInferenceContract = {
@@ -26,6 +24,12 @@ export type OcrInferenceContract = {
   }
 }
 
+export type AsrInferenceContract = {
+  methods: {
+    transcribe: UtilityProcessMethod<AsrTranscribePayload, { text: string; segments: AsrSegment[] }>
+  }
+}
+
 const INFERENCE_IDLE_TIMEOUT_MS = 60 * 1000
 
 async function createInferenceInitData(capability: LocalModelCapability): Promise<InferenceInitData> {
@@ -33,9 +37,12 @@ async function createInferenceInitData(capability: LocalModelCapability): Promis
   return {
     appPath: application.getPath('app.root'),
     artifactPaths: Object.fromEntries(bundle.requires.map((id) => [id, localModelStorageService.artifactPath(id)])),
-    runtimeProfile: resolveLocalInferenceProfile(
-      application.get('PreferenceService').get('feature.local_model.hardware_acceleration.enabled')
-    ),
+    runtimeProfile:
+      capability === 'asr'
+        ? CPU_LOCAL_INFERENCE_PROFILE
+        : resolveLocalInferenceProfile(
+            application.get('PreferenceService').get('feature.local_model.hardware_acceleration.enabled')
+          ),
     proxyRouting: await application.get('ProxyService').getRoutingSnapshot()
   }
 }
@@ -54,4 +61,12 @@ export const ocrInferenceProcess = defineUtilityProcess<OcrInferenceContract, In
   cancellation: 'cooperative',
   idleTimeoutMs: INFERENCE_IDLE_TIMEOUT_MS,
   createInitData: () => createInferenceInitData('ocr')
+})
+
+export const asrInferenceProcess = defineUtilityProcess<AsrInferenceContract, InferenceInitData>({
+  id: 'inference.asr',
+  entry: 'inference-asr',
+  cancellation: 'cooperative',
+  idleTimeoutMs: INFERENCE_IDLE_TIMEOUT_MS,
+  createInitData: () => createInferenceInitData('asr')
 })

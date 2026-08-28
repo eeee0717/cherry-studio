@@ -7,6 +7,7 @@ import { AgentSessionDeliveryService } from '@main/ai/agentSession/AgentSessionD
 import { AgentSessionRuntimeService } from '@main/ai/agentSession/AgentSessionRuntimeService'
 import { AiService } from '@main/ai/AiService'
 import { ChannelManager } from '@main/ai/channels'
+import { AsrInferenceService } from '@main/ai/localModel'
 import { EmbeddingInferenceService } from '@main/ai/localModel'
 import { OcrInferenceService } from '@main/ai/localModel'
 import { McpCatalogService } from '@main/ai/mcp/McpCatalogService'
@@ -152,6 +153,7 @@ export const services = {
   AiStreamManager,
   EmbeddingInferenceService,
   OcrInferenceService,
+  AsrInferenceService,
   KnowledgeService,
   KnowledgeVectorStoreService,
   MiniAppRuntimeService,

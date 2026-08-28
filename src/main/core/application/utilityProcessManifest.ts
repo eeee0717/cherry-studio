@@ -1,4 +1,4 @@
-import { embeddingInferenceProcess, ocrInferenceProcess } from '@main/ai/localModel/runtime/inferenceProcess'
+import { asrInferenceProcess, embeddingInferenceProcess, ocrInferenceProcess } from '@main/ai/localModel'
 import type { UtilityProcessManifest } from '@main/core/utilityProcess/types'
 
 /**
@@ -7,5 +7,6 @@ import type { UtilityProcessManifest } from '@main/core/utilityProcess/types'
  */
 export const utilityProcessManifest: UtilityProcessManifest = Object.freeze([
   embeddingInferenceProcess,
-  ocrInferenceProcess
+  ocrInferenceProcess,
+  asrInferenceProcess
 ])
